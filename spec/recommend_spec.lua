@@ -23,9 +23,16 @@ local function symbol(fields)
 end
 
 local function module_record(fields)
+  fields = fields or {}
+  local table_locals = fields.table_locals or {}
+  -- A file privata found a private namespace in necessarily declares it, so
+  -- the two always agree outside a deliberately contrived case.
+  if fields.private_name then
+    table_locals[fields.private_name] = true
+  end
   return {
-    shape = { private_name = fields and fields.private_name or nil },
-    scope = { chunk_locals = (fields and fields.chunk_locals) or 3 },
+    shape = { private_name = fields.private_name, table_locals = table_locals },
+    scope = { chunk_locals = fields.chunk_locals or 3 },
   }
 end
 
@@ -33,13 +40,13 @@ describe("recommend", function()
   describe("strategy order", function()
     it("recommends the namespace by default", function()
       local result = recommend.for_symbol(symbol({}), module_record(), settings())
-      assert.equals("namespace", result.strategy)
+      assert.equal("namespace", result.strategy)
       assert.matches("move to `_P%.helper`", result.text)
     end)
 
-    it("uses the namespace the file already has", function()
+    it("uses the configured namespace when the file already declares it", function()
       local record = module_record({ private_name = "_internal" })
-      local result = recommend.for_symbol(symbol({}), record, settings())
+      local result = recommend.for_symbol(symbol({}), record, settings({ namespace = "_internal" }))
       assert.matches("move to `_internal%.helper`", result.text)
       assert.same({}, result.notes)
     end)
@@ -55,7 +62,7 @@ describe("recommend", function()
         module_record(),
         settings({ privatize = { "local_function", "namespace" } })
       )
-      assert.equals("local_function", result.strategy)
+      assert.equal("local_function", result.strategy)
       assert.matches("local function helper", result.text)
     end)
 
@@ -67,7 +74,7 @@ describe("recommend", function()
         module_record({ chunk_locals = 500 }),
         settings({ privatize = { "local_function" } })
       )
-      assert.equals("namespace", result.strategy)
+      assert.equal("namespace", result.strategy)
     end)
   end)
 
@@ -80,7 +87,7 @@ describe("recommend", function()
         module_record({ chunk_locals = 180 }),
         settings(prefer_local)
       )
-      assert.equals("namespace", result.strategy)
+      assert.equal("namespace", result.strategy)
     end)
 
     it("names the forward declaration a later definition would need", function()
@@ -91,7 +98,7 @@ describe("recommend", function()
         module_record(),
         settings(prefer_local)
       )
-      assert.equals("local_function", result.strategy)
+      assert.equal("local_function", result.strategy)
       assert.matches("forward `local helper` before line 4", result.notes[1])
     end)
 
@@ -104,7 +111,7 @@ describe("recommend", function()
           local_function_forward_decl = false,
         })
       )
-      assert.equals("namespace", result.strategy)
+      assert.equal("namespace", result.strategy)
     end)
 
     it("uses the assignment form when configured", function()
@@ -143,6 +150,50 @@ describe("recommend", function()
     end)
   end)
 
+  describe("never recommends a move to where the symbol already is", function()
+    it("skips the namespace when the public table is already named _P", function()
+      -- `local _P = {} ... return _P` exports `_P`, so its fields sit on a
+      -- table named exactly like the namespace privata would suggest. Telling
+      -- the author to move `_P.x` to `_P.x` is not an instruction.
+      local result = recommend.for_symbol(
+        symbol({ namespace = "_P" }),
+        module_record({ table_locals = { _P = true } }),
+        settings()
+      )
+      assert.not_equal("namespace", result.strategy)
+      assert.is_nil(result.text:find("move to `_P%.helper`"))
+    end)
+
+    it("does not tell a file with a _P local to add one", function()
+      local result = recommend.for_symbol(
+        symbol({ namespace = "M" }),
+        module_record({ table_locals = { _P = true } }),
+        settings()
+      )
+      assert.equal("namespace", result.strategy)
+      assert.same({}, result.notes)
+    end)
+
+    it("skips the underscore field for an already underscore-led name", function()
+      local result = recommend.for_symbol(
+        symbol({ name = "_helper", namespace = "M" }),
+        module_record(),
+        settings({ privatize = { "underscore_field" } })
+      )
+      assert.not_equal("underscore_field", result.strategy)
+    end)
+  end)
+
+  describe("never names a table other than the configured namespace", function()
+    it("ignores a stale private_name that disagrees with the config", function()
+      -- Belt and braces: shape should never hand over a name the config did not
+      -- ask for, and if it ever did, the recommendation must not repeat it.
+      local record = module_record({ private_name = "_DEFAULT_CHARS" })
+      local result = recommend.for_symbol(symbol({}), record, settings())
+      assert.matches("move to `_P%.helper`", result.text)
+    end)
+  end)
+
   describe("special cases", function()
     it("tells a literal export table to drop the name", function()
       -- The binding is already a local; there is nothing to move.
@@ -157,7 +208,7 @@ describe("recommend", function()
         module_record(),
         settings({ privatize = { "underscore_field" } })
       )
-      assert.equals("underscore_field", result.strategy)
+      assert.equal("underscore_field", result.strategy)
       assert.matches("rename to `M%._helper`", result.text)
     end)
   end)

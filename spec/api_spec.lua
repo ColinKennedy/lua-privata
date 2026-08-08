@@ -37,7 +37,7 @@ describe("public api", function()
     project.with(PROJECT, function(root)
       local findings, config = privata.check(root)
       assert.is_table(findings)
-      assert.equals("_P", config.namespace)
+      assert.equal("_P", config.namespace)
     end)
   end)
 
@@ -64,7 +64,7 @@ describe("public api", function()
   it("runs the method check whenever it is asked for by name", function()
     -- Calling the helper is the opt-in, so the config flag is beside the point.
     project.with(PROJECT, function(root)
-      assert.equals(0, #privata.check(root).methods)
+      assert.equal(0, #privata.check(root).methods)
       assert.is_true(#privata.find_method_candidates(root) > 0)
     end)
   end)
@@ -75,7 +75,7 @@ describe("public api", function()
       ["src/pkg.lua"] = "return {}",
       [".privata.lua"] = "return { source_roots = { 'lua', 'src' } }",
     }, function(root)
-      assert.equals(1, #privata.find_collisions(root))
+      assert.equal(1, #privata.find_collisions(root))
     end)
   end)
 

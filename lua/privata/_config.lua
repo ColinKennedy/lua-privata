@@ -8,6 +8,7 @@
 
 local fs = require("privata._fs")
 local literal = require("privata._literal")
+local models = require("privata._models")
 
 local M = {}
 local _P = {}
@@ -29,12 +30,35 @@ function _P.defaults()
     exclude = {},
 
     privatize = { "namespace", "local_function", "underscore_field" },
-    namespace = "_P",
+    namespace = models.DEFAULT_NAMESPACE,
     local_function_style = "statement",
     local_function_forward_decl = true,
     max_locals = 180,
 
     private_module_patterns = { "^_" },
+
+    -- Package prefixes inside which a private name may be read by a sibling.
+    -- Empty by default: for a library, a sibling reaching into another module's
+    -- internals is still worth knowing about. An application whose modules all
+    -- live under one package says so here.
+    package_private = {},
+
+    -- Which finding kinds make the run exit non-zero. Every kind by default,
+    -- so behaviour is unchanged; narrowing it is how a project says "report
+    -- this but do not block on it", which `checks` cannot express because
+    -- switching a check off also stops it reporting.
+    fail_on = {
+      "unparsable",
+      "collisions",
+      "unanalyzable",
+      "symbols",
+      "globals",
+      "exported_namespaces",
+      "private_modules",
+      "private_symbols",
+      "exports",
+      "methods",
+    },
 
     globals = {},
 
@@ -50,6 +74,7 @@ function _P.defaults()
     checks = {
       symbols = true,
       globals = true,
+      exported_namespaces = true,
       private_modules = true,
       private_symbols = true,
       exports = true,
@@ -160,6 +185,8 @@ local STRING_LISTS = {
   "exclude",
   "privatize",
   "private_module_patterns",
+  "package_private",
+  "fail_on",
   "globals",
   "entrypoint_globs",
   "entrypoint_names",
@@ -205,6 +232,26 @@ function _P.validate(config)
 
   if not _P.FORMATS[config.format] then
     problems[#problems + 1] = "format must be 'text' or 'json'"
+  end
+
+  local FAIL_ON_KINDS = {
+    unparsable = true,
+    collisions = true,
+    unanalyzable = true,
+    symbols = true,
+    globals = true,
+    exported_namespaces = true,
+    private_modules = true,
+    private_symbols = true,
+    exports = true,
+    methods = true,
+  }
+  if _P.is_string_list(config.fail_on) then
+    for i = 1, #config.fail_on do
+      if not FAIL_ON_KINDS[config.fail_on[i]] then
+        problems[#problems + 1] = "unknown fail_on kind '" .. config.fail_on[i] .. "'"
+      end
+    end
   end
 
   if type(config.max_locals) ~= "number" or config.max_locals < 1 then
@@ -281,9 +328,10 @@ function M.load(project_root, overrides)
 
   local validated, problems = _P.validate(config)
   if not validated then
+    local issues = problems or {}
     local labelled = {}
-    for i = 1, #problems do
-      labelled[i] = (file_path and (file_path .. ": ") or "") .. problems[i]
+    for i = 1, #issues do
+      labelled[i] = (file_path and (file_path .. ": ") or "") .. issues[i]
     end
     return nil, labelled
   end

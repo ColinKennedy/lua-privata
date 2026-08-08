@@ -16,6 +16,11 @@ local _P = {}
 ---@field module string
 ---@field path string
 ---@field uses integer[]       lines inside the defining module that read it
+---@field end_line integer     last line of a function value, for recursion checks
+---@field recommendation table|nil  filled in by `_recommend` when reported
+---@field test_read table|nil       where a spec reads it, if one does
+---@field test_stub table|nil       where a spec replaces it, if one does
+---@field string_mention table|nil  where its name appears in a string literal
 
 ---@class privata.Method
 ---@field name string
@@ -42,6 +47,12 @@ local _P = {}
 ---@field path string
 ---@field line integer
 
+--- The private namespace privata recommends when a config does not say
+--- otherwise. Defined here so `_config` and `_shape` cannot drift apart: one
+--- of them deciding the default is `_P` while the other assumes nothing would
+--- mean a file's own `_P` went unrecognised.
+M.DEFAULT_NAMESPACE = "_P"
+
 --- What a public name is bound to. Only used for wording a report; no check
 --- branches on it, because a table and a function leak an interface alike.
 M.KINDS = {
@@ -63,7 +74,6 @@ M.UNANALYZABLE = {
   MULTIPLE_RETURNS = "returns more than one value",
   CONDITIONAL_RETURN = "returns from more than one place",
   COMPUTED_RETURN = "returns a table this scan cannot read statically",
-  NO_RETURN = "returns nothing, so it exports nothing to read",
   LEGACY_MODULE = "uses the 5.1 module() function",
 }
 

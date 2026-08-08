@@ -59,19 +59,36 @@ function _P.needs_forward_declaration(symbol)
   return earliest ~= nil and earliest < symbol.line
 end
 
+--- The table a namespace recommendation would move the symbol into.
+--
+-- Always the configured namespace. `shape.private_name` is only ever set to
+-- that same name, but it is checked rather than trusted: the one thing this
+-- recommendation must never do is name some unrelated table that happens to
+-- exist in the file, which is exactly the bug that motivated the guard.
+function _P.target_namespace(module_record, config)
+  local detected = module_record.shape.private_name
+  if detected ~= nil and detected == config.namespace then
+    return detected
+  end
+  return config.namespace
+end
+
 function _P.namespace_recommendation(symbol, module_record, config)
-  local namespace = module_record.shape.private_name or config.namespace
-  local text = string.format("move to `%s.%s`", namespace, symbol.name)
+  local namespace = _P.target_namespace(module_record, config)
   local notes = {}
 
-  if module_record.shape.private_name == nil then
+  -- Only suggest declaring the table when the file does not already have one.
+  -- A module whose *public* table happens to be named `_P` still has that
+  -- local, and telling its author to add a second one would be nonsense.
+  local table_locals = module_record.shape.table_locals or {}
+  if table_locals[namespace] == nil then
     notes[#notes + 1] = string.format("add `local %s = {}` near the top of the file", namespace)
   end
 
   return {
     strategy = _P.STRATEGIES.NAMESPACE,
     namespace = namespace,
-    text = text,
+    text = string.format("move to `%s.%s`", namespace, symbol.name),
     notes = notes,
   }
 end
@@ -115,6 +132,50 @@ function _P.local_function_recommendation(symbol, config)
   }
 end
 
+--- Relative path wording for a test location, kept short in the report.
+function _P.where(location)
+  return string.format("%s:%d", location.path:gsub(".*/([^/]+/[^/]+)$", "%1"), location.line)
+end
+
+--- The recommendation forced by something outside this module holding the field.
+--
+-- Two cases, and the second is worse than it looks. A spec that *reads*
+-- `mod.name` needs the name to stay on the table. A spec that *assigns*
+-- `mod.name = function() ... end` is using the module table as an injection
+-- seam: production code calling `M.name(...)` picks up the stub because the
+-- call resolves through the table at call time. Privatising that field does not
+-- merely make it untestable, it deletes the seam -- so the honest report says
+-- the spec must change too, rather than handing over a rename that looks free.
+function _P.reachability_recommendation(symbol)
+  if symbol.test_stub then
+    return {
+      strategy = _P.STRATEGIES.UNDERSCORE_FIELD,
+      text = string.format("rename to `%s._%s`", symbol.namespace, symbol.name),
+      notes = {
+        string.format(
+          "stubbed by %s -- it is an injection seam; privatising needs the spec updated too",
+          _P.where(symbol.test_stub)
+        ),
+      },
+    }
+  end
+
+  if symbol.test_read then
+    return {
+      strategy = _P.STRATEGIES.UNDERSCORE_FIELD,
+      text = string.format("rename to `%s._%s`", symbol.namespace, symbol.name),
+      notes = {
+        string.format(
+          "read by %s -- keep it on the table so the spec can still reach it",
+          _P.where(symbol.test_read)
+        ),
+      },
+    }
+  end
+
+  return nil
+end
+
 function _P.underscore_recommendation(symbol)
   return {
     strategy = _P.STRATEGIES.UNDERSCORE_FIELD,
@@ -125,8 +186,17 @@ end
 
 --- Whether a strategy can be applied to this symbol in this module.
 function _P.is_applicable(strategy, symbol, module_record, config)
-  if strategy == _P.STRATEGIES.NAMESPACE or strategy == _P.STRATEGIES.UNDERSCORE_FIELD then
-    return true
+  if strategy == _P.STRATEGIES.NAMESPACE then
+    -- A field cannot be moved into the table it is already on. This is not
+    -- hypothetical: a module written as `local _P = {} ... return _P` exports
+    -- `_P`, so its fields sit on a table named exactly like the private
+    -- namespace privata would otherwise recommend.
+    return _P.target_namespace(module_record, config) ~= symbol.namespace
+  end
+
+  if strategy == _P.STRATEGIES.UNDERSCORE_FIELD then
+    -- A name that is already underscore-led has nowhere to go this way.
+    return symbol.name:sub(1, 1) ~= "_"
   end
 
   if strategy == _P.STRATEGIES.LOCAL_FUNCTION then
@@ -158,6 +228,16 @@ function M.for_symbol(symbol, module_record, config)
     }
   end
 
+  -- Test usage still does not make a symbol public. It does decide which
+  -- privatisation is *legal*: a spec holds the module table and nothing else,
+  -- so moving the field to a file-local leaves the spec calling nil. The
+  -- underscore field stays reachable, which is why it is the answer here even
+  -- though it is the weakest form and ranks last by default.
+  local reachable = _P.reachability_recommendation(symbol)
+  if reachable then
+    return reachable
+  end
+
   local strategies = config.privatize
   for i = 1, #strategies do
     local strategy = strategies[i]
@@ -171,9 +251,32 @@ function M.for_symbol(symbol, module_record, config)
     end
   end
 
-  -- The configured list held only strategies that cannot apply here. The
-  -- namespace form always can, so it is the floor rather than an error.
-  return _P.namespace_recommendation(symbol, module_record, config)
+  -- The configured list held only strategies that cannot apply here. Fall back
+  -- to whichever of the remaining forms is legal rather than emitting one that
+  -- is not: an instruction the reader cannot follow is worse than a blunter one.
+  local fallbacks = {
+    _P.STRATEGIES.NAMESPACE,
+    _P.STRATEGIES.LOCAL_FUNCTION,
+    _P.STRATEGIES.UNDERSCORE_FIELD,
+  }
+  for i = 1, #fallbacks do
+    if _P.is_applicable(fallbacks[i], symbol, module_record, config) then
+      if fallbacks[i] == _P.STRATEGIES.NAMESPACE then
+        return _P.namespace_recommendation(symbol, module_record, config)
+      elseif fallbacks[i] == _P.STRATEGIES.LOCAL_FUNCTION then
+        return _P.local_function_recommendation(symbol, config)
+      end
+      return _P.underscore_recommendation(symbol)
+    end
+  end
+
+  -- Nothing structural is left to suggest, so say the only thing that is
+  -- always true rather than inventing a move.
+  return {
+    strategy = _P.STRATEGIES.LOCAL_FUNCTION,
+    text = "stop exporting it",
+    notes = {},
+  }
 end
 
 return M

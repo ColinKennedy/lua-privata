@@ -16,6 +16,7 @@ M.KINDS = {
   TABLE = "table", -- local M = {} ... return M
   CLASS = "class", -- local C = {}; C.__index = C ... return C
   LITERAL = "literal", -- return { a = a, b = b }
+  SIDE_EFFECT = "side_effect", -- returns nothing; runs for what it does
 }
 
 --- A `local X = {}` at chunk level, by name.
@@ -97,20 +98,20 @@ end
 
 --- The name a file uses for its private namespace, when it has one.
 --
--- The configured name is looked for first, then any other private-looking table
--- local, so a project that has not configured `namespace` still gets its `_P`
--- recognised rather than reported as a pile of private-looking symbols.
+-- Only the configured name counts, and privata will not guess at a substitute.
+-- An earlier version fell back to any private-looking table local, which sounds
+-- accommodating and is not: `local _DEFAULT_ACCEPTED_CHARS = { ... }` is a
+-- private *constant*, not a namespace, and treating it as one made privata
+-- recommend moving unrelated functions into a table of characters.
+--
+-- A project that spells its namespace differently says so in `namespace`. The
+-- cost of not guessing is that such a project sees its fields reported until it
+-- does; the cost of guessing is advice that is confidently wrong.
 function _P.find_private_namespace(table_locals, configured)
   if configured and table_locals[configured] then
     return configured
   end
-  local best = nil
-  for name in pairs(table_locals) do
-    if models.is_private_name(name) and (best == nil or name < best) then
-      best = name
-    end
-  end
-  return best
+  return nil
 end
 
 --- True when a chunk marks `name` as a metatable-based class.
@@ -156,15 +157,21 @@ end
 -- Returns a shape table. `kind` is one of `M.KINDS` when the file could be
 -- read, or nil with `reason` set from `models.UNANALYZABLE` when it could not.
 function M.detect(chunk, config)
-  local configured_namespace = config and config.namespace or nil
+  local configured_namespace = (config and config.namespace) or models.DEFAULT_NAMESPACE
 
   if _P.uses_legacy_module(chunk) then
     return { reason = models.UNANALYZABLE.LEGACY_MODULE, line = 1 }
   end
 
+  -- A file that returns nothing is a side-effect module, not a shape privata
+  -- failed to read. Setting autocommands, installing keymaps, registering
+  -- commands: the file runs for what it does, and exporting nothing is the
+  -- point rather than an omission. It exposes no interface, so it has no
+  -- symbols to report -- but it is still parsed, and the names it reads still
+  -- count as uses of the modules it requires.
   local last = chunk.body[#chunk.body]
   if last == nil or last.kind ~= "ReturnStatement" then
-    return { reason = models.UNANALYZABLE.NO_RETURN, line = last and last.line or 1 }
+    return { kind = M.KINDS.SIDE_EFFECT, line = last and last.line or 1 }
   end
 
   if _P.has_conditional_return(chunk) then
@@ -190,6 +197,7 @@ function M.detect(chunk, config)
       literal = returned,
       is_reexport_table = _P.is_reexport_table(returned),
       private_name = private_name,
+      table_locals = table_locals,
     }
   end
 
@@ -211,6 +219,7 @@ function M.detect(chunk, config)
       public_line = declared.line,
       return_line = last.line,
       private_name = private_name,
+      table_locals = table_locals,
     }
   end
 

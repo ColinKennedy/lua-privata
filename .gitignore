@@ -5,3 +5,4 @@ lua_modules/
 luacov.stats.out
 luacov.report.out
 /build/
+.dependencies/

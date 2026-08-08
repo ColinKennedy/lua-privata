@@ -133,6 +133,16 @@ function M.render(findings, project_root, config)
         reason = entry.reason,
       }
     end),
+    exported_namespaces = _P.map(findings.exported_namespaces, function(entry)
+      return {
+        file = _P.relative(entry.path, project_root),
+        line = entry.line,
+        module = entry.module,
+        namespace = entry.namespace,
+        public_table = entry.public_table,
+        public_fields = entry.public_symbols,
+      }
+    end),
     symbols = _P.map(findings.symbols, function(entry)
       return _P.symbol(entry, project_root)
     end),

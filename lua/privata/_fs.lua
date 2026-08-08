@@ -43,7 +43,13 @@ function _P.detect()
   error("privata: no filesystem backend available (need Neovim, lfs, or io.popen)", 0)
 end
 
-local BACKEND, LIB = _P.detect()
+local BACKEND, BACKEND_LIBRARY = _P.detect()
+
+--- The chosen backend's library. The popen backend has none, so this is an
+--- empty table there and every branch that indexes it is guarded by `BACKEND`.
+--- Typed loosely on purpose: `vim.uv` and `lfs` share no interface.
+---@type table<string, function>
+local LIB = BACKEND_LIBRARY or {}
 
 _P.backend = BACKEND
 

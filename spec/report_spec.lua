@@ -32,7 +32,7 @@ describe("report", function()
         },
         nil,
         function(text)
-          assert.equals("No module privacy issues found.", text)
+          assert.equal("No module privacy issues found.", text)
         end
       )
     end)
@@ -206,19 +206,19 @@ return C
       local encode = json_report._P.encode
       -- Long strings do not process escapes, so these are the literal bytes
       -- the encoder must produce.
-      assert.equals([["a\tb"]], encode("a\tb"))
-      assert.equals([["say \"hi\""]], encode('say "hi"'))
-      assert.equals([["back\\slash"]], encode("back\\slash"))
+      assert.equal([["a\tb"]], encode("a\tb"))
+      assert.equal([["say \"hi\""]], encode('say "hi"'))
+      assert.equal([["back\\slash"]], encode("back\\slash"))
       -- A control character with no short escape falls back to \u.
-      assert.equals([["\u0001"]], encode("\1"))
+      assert.equal([["\u0001"]], encode("\1"))
     end)
 
     it("encodes an empty table as an array", function()
-      assert.equals("[]", json_report._P.encode({}))
+      assert.equal("[]", json_report._P.encode({}))
     end)
 
     it("encodes nested objects with sorted keys", function()
-      assert.equals([[{"a":1,"b":[1,2]}]], json_report._P.encode({ b = { 1, 2 }, a = 1 }))
+      assert.equal([[{"a":1,"b":[1,2]}]], json_report._P.encode({ b = { 1, 2 }, a = 1 }))
     end)
 
     it("marks a downgraded condition", function()

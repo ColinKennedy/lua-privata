@@ -123,8 +123,9 @@ function M.main(argv, io_streams)
 
   local config, problems = config_mod.load(project_root, overrides)
   if not config then
-    for i = 1, #problems do
-      _P.write(err, "privata: " .. problems[i])
+    local issues = problems or {}
+    for i = 1, #issues do
+      _P.write(err, "privata: " .. issues[i])
     end
     return _P.EXIT_USAGE
   end

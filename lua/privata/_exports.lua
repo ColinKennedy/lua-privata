@@ -51,24 +51,22 @@ function _P.check_module(record)
     local name = field.key.value
     local bound = field.value.name
 
+    local kind = nil
     if locals[bound] == nil then
       -- Lua exports nil for an unbound name rather than raising, so this is a
       -- broken interface that no test necessarily catches.
-      issues[#issues + 1] = {
-        module = record.name,
-        path = record.path,
-        name = name,
-        binding = bound,
-        kind = _P.ISSUES.UNKNOWN,
-        line = field.line,
-      }
+      kind = _P.ISSUES.UNKNOWN
     elseif models.is_private_name(name) then
+      kind = _P.ISSUES.PRIVATE
+    end
+
+    if kind ~= nil and not record.ignored_lines[field.line] then
       issues[#issues + 1] = {
         module = record.name,
         path = record.path,
         name = name,
         binding = bound,
-        kind = _P.ISSUES.PRIVATE,
+        kind = kind,
         line = field.line,
       }
     end

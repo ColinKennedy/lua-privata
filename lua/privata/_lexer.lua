@@ -255,7 +255,8 @@ function _P.read_short_string(state, quote)
         pos = e + 1
       elseif find(nextc, "^%d") then
         local _, e, digits = find(state.src, "^(%d%d?%d?)", pos + 1)
-        local value = tonumber(digits)
+        -- The pattern matched one to three digits, so this always parses.
+        local value = assert(tonumber(digits))
         if value > 255 then
           _P.fail(state, "decimal escape too large")
         end
@@ -335,7 +336,7 @@ function M.tokenize(src)
   -- Lua itself skips a leading `#!` line when loading a file, so a bin script
   -- is ordinary source; privata must read it the same way.
   if sub(src, 1, 1) == "#" then
-    local _, e = find(src, "^[^\r\n]*")
+    local e = select(2, find(src, "^[^\r\n]*")) or 0
     src = string.rep(" ", e) .. sub(src, e + 1)
   end
   -- A UTF-8 BOM is not whitespace to the pattern matcher, so strip it rather
@@ -413,8 +414,9 @@ function M.tokenize(src)
         col = col,
       })
     elseif find(src, "^[%a_]", pos) then
+      -- Guarded by the branch above, which already matched a leading name char.
       local s, e = find(src, "^[%a_][%w_]*", pos)
-      local word = sub(src, s, e)
+      local word = sub(src, assert(s), e)
       state.pos = e + 1
       push({
         type = KEYWORDS[word] and "keyword" or "name",

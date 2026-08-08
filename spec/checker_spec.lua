@@ -221,8 +221,8 @@ describe("checker", function()
         },
         nil,
         function(findings)
-          assert.equals(1, #findings.private_module_requires)
-          assert.equals("pkg.feature._runtime", findings.private_module_requires[1].module)
+          assert.equal(1, #findings.private_module_requires)
+          assert.equal("pkg.feature._runtime", findings.private_module_requires[1].module)
         end
       )
     end)
@@ -265,8 +265,8 @@ describe("checker", function()
         },
         nil,
         function(findings)
-          assert.equals(1, #findings.private_symbol_reads)
-          assert.equals("_helper", findings.private_symbol_reads[1].name)
+          assert.equal(1, #findings.private_symbol_reads)
+          assert.equal("_helper", findings.private_symbol_reads[1].name)
         end
       )
     end)
@@ -293,8 +293,8 @@ describe("checker", function()
         },
         nil,
         function(findings)
-          assert.equals(1, #findings.private_symbol_reads)
-          assert.equals("_P", findings.private_symbol_reads[1].name)
+          assert.equal(1, #findings.private_symbol_reads)
+          assert.equal("_P", findings.private_symbol_reads[1].name)
         end
       )
     end)
@@ -309,8 +309,8 @@ describe("checker", function()
         },
         nil,
         function(findings)
-          assert.equals(1, #findings.export_issues)
-          assert.equals("unknown", findings.export_issues[1].kind)
+          assert.equal(1, #findings.export_issues)
+          assert.equal("unknown", findings.export_issues[1].kind)
         end
       )
     end)
@@ -334,7 +334,7 @@ describe("checker", function()
   describe("unreliable scans", function()
     it("reports a file it cannot parse", function()
       scan({ ["lua/pkg/bad.lua"] = "local = =" }, nil, function(findings)
-        assert.equals(1, #findings.unparsable)
+        assert.equal(1, #findings.unparsable)
       end)
     end)
 
@@ -343,8 +343,8 @@ describe("checker", function()
         ["lua/pkg.lua"] = "return {}",
         ["src/pkg.lua"] = "return {}",
       }, { source_roots = { "lua", "src" } }, function(findings)
-        assert.equals(1, #findings.collisions)
-        assert.equals("pkg", findings.collisions[1].module)
+        assert.equal(1, #findings.collisions)
+        assert.equal("pkg", findings.collisions[1].module)
       end)
     end)
 
@@ -355,8 +355,129 @@ describe("checker", function()
         },
         nil,
         function(findings)
-          assert.equals(1, #findings.unanalyzable)
+          assert.equal(1, #findings.unanalyzable)
           assert.matches("more than one place", findings.unanalyzable[1].reason)
+        end
+      )
+    end)
+  end)
+
+  describe("exporting the private namespace", function()
+    it("reports a module that returns the configured private namespace", function()
+      -- `return _P` publishes the table the config calls private, which is the
+      -- exact opposite of what naming it `_P` was meant to say.
+      scan(
+        {
+          ["lua/pkg/thing.lua"] = [[
+local _P = {}
+function _P.helper() end
+function _P.run() return _P.helper() end
+return _P
+]],
+        },
+        nil,
+        function(findings)
+          assert.equal(1, #findings.exported_namespaces)
+          assert.equal("_P", findings.exported_namespaces[1].namespace)
+          assert.equal(2, findings.exported_namespaces[1].public_symbols)
+        end
+      )
+    end)
+
+    it("suppresses the per-field findings for that module", function()
+      -- Each would restate the same structural problem and point at a table the
+      -- field already sits on.
+      scan(
+        {
+          ["lua/pkg/thing.lua"] = [[
+local _P = {}
+function _P.helper() end
+return _P
+]],
+        },
+        nil,
+        function(findings)
+          assert.same({}, names(findings.symbols))
+        end
+      )
+    end)
+
+    it("names the table to merge into when the file already has one", function()
+      scan(
+        {
+          ["lua/pkg/thing.lua"] = [[
+local _P = {}
+local M = {}
+function _P.helper() end
+function M.run() return _P.helper() end
+return _P
+]],
+        },
+        nil,
+        function(findings)
+          assert.equal("M", findings.exported_namespaces[1].public_table)
+        end
+      )
+    end)
+
+    it("leaves public_table nil when there is nothing to merge into", function()
+      scan(
+        {
+          ["lua/pkg/thing.lua"] = "local _P = {}\nfunction _P.helper() end\nreturn _P",
+        },
+        nil,
+        function(findings)
+          assert.is_nil(findings.exported_namespaces[1].public_table)
+        end
+      )
+    end)
+
+    it("follows the configured namespace, not the literal name _P", function()
+      scan({
+        ["lua/pkg/thing.lua"] = "local Priv = {}\nfunction Priv.helper() end\nreturn Priv",
+      }, { namespace = "Priv" }, function(findings)
+        assert.equal(1, #findings.exported_namespaces)
+      end)
+    end)
+
+    it("says nothing about a module returning an ordinary table", function()
+      scan(
+        {
+          ["lua/pkg/thing.lua"] = "local M = {}\nfunction M.helper() end\nreturn M",
+        },
+        nil,
+        function(findings)
+          assert.same({}, findings.exported_namespaces)
+          assert.same({ "helper" }, names(findings.symbols))
+        end
+      )
+    end)
+  end)
+
+  describe("side-effect modules", function()
+    it("does not report a file that returns nothing", function()
+      scan(
+        {
+          ["lua/pkg/keymaps.lua"] = "local vim = vim\nvim.keymap.set('n', 'x', function() end)",
+        },
+        nil,
+        function(findings)
+          assert.same({}, findings.unanalyzable)
+          assert.same({}, findings.symbols)
+        end
+      )
+    end)
+
+    it("still counts what a side-effect module reads", function()
+      -- The file exports nothing, but its requires are real uses.
+      scan(
+        {
+          ["lua/pkg/service.lua"] = "local M = {}\nfunction M.run() end\nreturn M",
+          ["lua/pkg/setup.lua"] = "local service = require('pkg.service')\nservice.run()",
+        },
+        nil,
+        function(findings)
+          assert.same({}, findings.symbols)
         end
       )
     end)

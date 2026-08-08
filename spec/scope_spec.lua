@@ -25,8 +25,8 @@ describe("scope", function()
 
     it("says whether a global holds a function", function()
       local entry = analyze("thing = function() end").assigned[1]
-      assert.equals("function", entry.kind)
-      assert.equals("value", analyze("thing = 1").assigned[1].kind)
+      assert.equal("function", entry.kind)
+      assert.equal("value", analyze("thing = 1").assigned[1].kind)
     end)
 
     it("stays quiet about a local", function()
@@ -47,7 +47,7 @@ describe("scope", function()
     end)
 
     it("records the line", function()
-      assert.equals(2, analyze("local a = 1\nglobal_thing = 2").assigned[1].line)
+      assert.equal(2, analyze("local a = 1\nglobal_thing = 2").assigned[1].line)
     end)
   end)
 
@@ -55,7 +55,7 @@ describe("scope", function()
     it("evaluates a local initialiser before the name exists", function()
       -- `local x = x` reads the outer x, so the read must not resolve to the
       -- name being declared.
-      assert.equals(1, analyze("local x = x").read.x)
+      assert.equal(1, analyze("local x = x").read.x)
     end)
 
     it("makes a local function visible inside its own body", function()
@@ -71,7 +71,7 @@ describe("scope", function()
     end)
 
     it("scopes for-loop variables to the loop", function()
-      assert.equals(2, analyze("for i = 1, 2 do end\nreturn i").read.i)
+      assert.equal(2, analyze("for i = 1, 2 do end\nreturn i").read.i)
       assert.is_nil(analyze("for i = 1, 2 do return i end").read.i)
     end)
 
@@ -81,27 +81,27 @@ describe("scope", function()
 
     it("scopes function parameters to the function", function()
       assert.is_nil(analyze("local f = function(a) return a end").read.a)
-      assert.equals(2, analyze("local f = function(a) end\nreturn a").read.a)
+      assert.equal(2, analyze("local f = function(a) end\nreturn a").read.a)
     end)
   end)
 
   describe("locals budget", function()
     it("counts locals in the chunk's own scope", function()
-      assert.equals(2, analyze("local a = 1\nlocal b = 2").chunk_locals)
+      assert.equal(2, analyze("local a = 1\nlocal b = 2").chunk_locals)
     end)
 
     it("does not count block locals against the chunk", function()
       -- Lua's limit is per function, and a do-block shares the enclosing
       -- function's register file, but privata only budgets what it would add.
-      assert.equals(1, analyze("local a = 1\ndo local b = 2 end").chunk_locals)
+      assert.equal(1, analyze("local a = 1\ndo local b = 2 end").chunk_locals)
     end)
 
     it("counts a repeated declaration once", function()
-      assert.equals(1, analyze("local a = 1\nlocal a = 2").chunk_locals)
+      assert.equal(1, analyze("local a = 1\nlocal a = 2").chunk_locals)
     end)
 
     it("tracks the largest function scope", function()
-      assert.equals(3, analyze("local f = function(a, b) local c end").max_function_locals)
+      assert.equal(3, analyze("local f = function(a, b) local c end").max_function_locals)
     end)
   end)
 end)

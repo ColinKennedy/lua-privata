@@ -21,6 +21,8 @@ local _P = {}
 -- Returns the value, or nil plus a reason. Note that a literal `nil` in the
 -- source is indistinguishable from failure in a single return value, which is
 -- why the reason is what callers branch on.
+---@return any value   the Lua value, or nil when it could not be read
+---@return string|nil reason
 function _P.eval(node)
   if not ast.is_node(node) then
     return nil, "missing value"
@@ -134,11 +136,19 @@ function _P.returned_table(chunk)
   return value
 end
 
+--- Describe a parse failure, tolerating a missing reason.
+function _P.parse_failure(parse_error)
+  if parse_error == nil then
+    return "syntax error"
+  end
+  return string.format("line %d: %s", parse_error.line, parse_error.message)
+end
+
 --- Parse `src` and lift its returned table.
 function M.load_returned_table(src)
   local chunk, parse_error = parser.parse(src)
   if not chunk then
-    return nil, string.format("line %d: %s", parse_error.line, parse_error.message)
+    return nil, _P.parse_failure(parse_error)
   end
   return _P.returned_table(chunk)
 end
@@ -147,7 +157,7 @@ end
 function M.load_assignments(src)
   local chunk, parse_error = parser.parse(src)
   if not chunk then
-    return nil, string.format("line %d: %s", parse_error.line, parse_error.message)
+    return nil, _P.parse_failure(parse_error)
   end
   return _P.assignments(chunk)
 end

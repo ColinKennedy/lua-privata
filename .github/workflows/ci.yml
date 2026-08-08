@@ -56,13 +56,35 @@ jobs:
       - uses: leafo/gh-actions-luarocks@v4
 
       - run: luarocks install luacheck
-      - run: luacheck lua spec bin
+      - run: make luacheck
 
       - uses: JohnnyMorganz/stylua-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           version: latest
-          args: --check lua spec bin
+          args: --check lua spec bin scripts
+
+  llscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: leafo/gh-actions-lua@v10
+        with:
+          luaVersion: "5.4"
+
+      - uses: leafo/gh-actions-luarocks@v4
+
+      # llscheck drives lua-language-server, which is a separate binary.
+      - uses: jdx/mise-action@v2
+        with:
+          tool_versions: |
+            lua-language-server latest
+
+      - run: luarocks install llscheck
+
+      # Clones the busted and luassert LuaCATS definitions first.
+      - run: make llscheck
 
   coverage:
     runs-on: ubuntu-latest

@@ -6,7 +6,9 @@ privata is a static checker for keeping module boundaries intentional. It scans
 your production Lua modules and reports interface drift:
 
 - fields on a module table that no other module ever reads
-- globals, which are public to the entire process
+- globals, which are public to the entire process (a `_G.foo = …` declaration is
+  reported differently from a missing `local`, and one the host reaches through
+  `v:lua.foo` is not reported at all)
 - `require`s of a private module from outside the package that owns it
 - reads of another module's private names
 - literal `return { a = a }` tables that have gone stale
@@ -105,6 +107,13 @@ return {
   max_locals = 180,
 
   private_module_patterns = { "^_" },
+  package_private = {},            -- see "Package-private names"
+
+  fail_on = {                      -- which kinds exit non-zero
+    "unparsable", "collisions", "unanalyzable", "symbols", "globals",
+    "exported_namespaces", "private_modules", "private_symbols",
+    "exports", "methods",
+  },
 
   globals = {},                    -- names that are meant to be global
 
@@ -114,8 +123,9 @@ return {
   format = "text",
 
   checks = {
-    symbols = true, globals = true, private_modules = true,
-    private_symbols = true, exports = true, methods = false,
+    symbols = true, globals = true, exported_namespaces = true,
+    private_modules = true, private_symbols = true,
+    exports = true, methods = false,
   },
 }
 ```
@@ -124,6 +134,32 @@ The config file is **parsed, never executed**. Rockspecs and `.privata.lua` are
 both Lua source, and loading them would mean running arbitrary code just to scan
 a checkout. The cost is that a config cannot compute: `source_roots =
 vim.fn.glob(...)` is an error, not a list.
+
+### References written as strings
+
+A name is not only reached by code. privata resolves `require'mod'.name` and
+`v:lua.NAME` **inside string literals** and treats them as real references,
+because they are:
+
+```lua
+vim.wo.foldexpr = "v:lua.require'mod.folds'.foldexpr(v:lnum)"
+```
+
+That resolves through `require` when the option is evaluated and indexes the
+returned table, so moving the target to a file-local breaks the editor at
+runtime — not at load time, and not in the test suite. The string usually sits
+in the module it names, so these count as **entry points** rather than
+cross-module reads; a module referring to itself is otherwise ignored.
+
+For a bare name in a string — a dispatch table, `_G[name]`, `vim.fn[name]` — the
+finding is **annotated, never suppressed**:
+
+```
+      name also appears in a string at lua/pkg/dispatch.lua:14 -- check it is not reached by name
+```
+
+privata cannot tell that from a coincidence, so it says what it saw and leaves
+the decision to you rather than silently recommending a breaking rename.
 
 ### How privata recommends privatising
 
@@ -140,12 +176,75 @@ wins. `namespace` leads by default because it always applies:
   - a self-recursive definition always emits the statement form, because
     `local f = function()` cannot see its own name inside its initialiser.
 - **`underscore_field`** — `rename to M._helper`. Still reachable, so it stays
-  testable from specs; the weakest form, last by default.
+  testable from specs; the weakest form, last by default. Note that `_` then
+  carries two meanings in one codebase — module-internal-but-test-reachable
+  here, and package-internal if you use `package_private`. Usage disambiguates
+  them, but it is worth knowing before adopting both.
+
+**Test reachability overrides the order.** Test usage still does not make a
+symbol public — that policy is unchanged. But it does decide which
+privatisation is *legal*: a spec holds the module table and nothing else, so a
+field moved to a file-local leaves the spec calling nil. When a spec reads the
+symbol, privata recommends `M._foo`, which stays reachable, and says why:
+
+```
+lua/pkg/git.lua:407: function `M.parse_diff` -> rename to `M._parse_diff`
+    also read at :565
+    read by spec/git_spec.lua:204 -- keep it on the table so the spec can still reach it
+```
+
+A spec that *assigns* `mod.name = function() … end` is using the table as an
+injection seam, and privatising the field deletes it. That gets its own note,
+because the rename is not free — the spec has to change too.
 
 privata **only ever recommends narrowing an interface**, and there is no
 `--fix`. Where the private-symbol check proves a private name is read from
 elsewhere, that is reported as a boundary to fix at the call site, not as a hint
 to publish the name.
+
+### Package-private names
+
+privata otherwise models two visibility levels: on the interface, or file-local.
+Real codebases have a third. `M._SHARED` read by eight sibling modules of one
+application is not eight boundary violations with call sites to fix — it is
+Java's package-private, Rust's `pub(crate)`, Go's `internal/`.
+
+```lua
+package_private = { "modules" },
+```
+
+Private names are then readable from any module under `modules.*`, and still
+reported when read from outside it. Empty by default: for a library, a sibling
+reaching into another module's internals is worth knowing about, and only the
+project can say which it is.
+
+Because the default is empty and this setting is what makes the whole section go
+away, the section says so itself rather than leaving you to find it here:
+
+```text
+Found 20 private symbols read from another module (36 reads):
+
+  (if these are package-internal by design, set `package_private`)
+```
+
+### Adopting on an existing codebase
+
+A checker that goes red on day one and cannot go green gets `|| true`'d, and the
+findings that *were* worth blocking on are lost with the rest.
+
+**`fail_on`** names the kinds that exit non-zero. All of them by default. This
+is what `checks` cannot express: switching a check off also stops it reporting,
+so "tell me but do not block me" had no spelling.
+
+```lua
+fail_on = { "globals", "unparsable", "collisions" },
+```
+
+For anything finer-grained than a kind, the mechanism is `-- privata: ignore` on
+the line itself. It is deliberately the only way to dismiss an individual
+finding: a dismissal that lives next to the code it excuses is one a reviewer
+sees in the diff, and one that stops applying the moment the line changes. A
+recorded list of blessed findings kept somewhere else is neither.
 
 ### Neovim
 
@@ -168,7 +267,34 @@ local _P, M = {}, {} … return M              -- two-namespace
 return { foo = foo, bar = bar }              -- literal export table
 local C = {}; C.__index = C … return C       -- class module
 return setmetatable(M, mt)                   -- wrapped
+-- and a file with no return at all         -- side-effect module
 ```
+
+A file that returns nothing is a **side-effect module**, not a failure to read.
+Setting autocommands, installing keymaps, registering commands: the file runs
+for what it does, and exporting nothing is the point. It publishes no interface,
+so it has no symbols to report — but it is still parsed, and the names it reads
+still count as uses of the modules it requires.
+
+A side-effect module that returns `_P` anyway is usually doing it so a spec has
+something to require. privata says so, and the advice it gives is neither of the
+two obvious ones, because both are wrong here — returning nothing breaks the
+spec, and renaming to `M` publishes every field:
+
+```text
+Found 1 module returning the private namespace as a test handle
+(nothing in production reads it; advisory, never blocks):
+
+  lua/app/winbar.lua:989: returns `_P`, so all 38 fields on it are public
+      held by spec/winbar_spec.lua:42, and no production module reads it
+      if that is deliberate, say so: `local M = {}; M._P = _P; return M`
+```
+
+That publishes one clearly-marked seam instead of thirty-eight fields, which is
+narrower than either alternative. These findings are advisory: they print in
+their own section and never decide the exit code, because privata has already
+concluded there is no action that would improve the file. A module whose return
+value production *does* read is a different finding, and still gets the rename.
 
 It **refuses to guess** at multiple return values, conditional returns,
 loop-built tables, and Lua 5.1's `module()`. Those are reported as
@@ -201,7 +327,23 @@ when downgraded.
 function M.helper() end -- privata: ignore
 ```
 
-Line-scoped: it suppresses the finding on that line and nothing else.
+Line-scoped: it suppresses the finding on that line and nothing else. It works
+on **every** finding kind — public symbols, globals, private-module requires,
+private-symbol reads, export-table entries, exported namespaces, methods, an
+undetermined module shape, and even a file that will not parse.
+
+Two things worth knowing:
+
+- On an unparsable file it silences the *report*, not the consequence. The file
+  still contributes no references, so findings elsewhere may still be wrong.
+  That is the same trade `--skip-unparsable-files` makes, scoped to one file.
+- It is matched against raw source text, so it does not need code on the line to
+  be recognised — but a comment on its own line matches no finding, because
+  findings are located by the line they occur on.
+
+Module-name collisions are the one thing it cannot suppress: a collision is a
+fact about two files, so there is no single line to put it on. Use
+`--skip-module-collisions`.
 
 ## The method check
 
@@ -218,6 +360,37 @@ by a computed name, or when it is reached through `_G` or `load`. Dispatch
 privata cannot see at all — a table of bound methods assembled elsewhere, a name
 forwarded through `...` — is **not supported** and will produce false positives.
 Use `-- privata: ignore`.
+
+## What privata cannot see
+
+**Dispatch it cannot resolve.** The symbol check has the same blind spot the
+method check documents: a name assembled at runtime (`handlers["run_" .. mode]`),
+reached through `_G[name]`, `vim.fn[name]`, `load()`, or forwarded through `...`
+is invisible. privata resolves the two string shapes it can (above) and
+annotates a third; beyond that, `-- privata: ignore` is the answer.
+
+**Intent that has not been exercised.** privata infers intent from observed
+usage, which holds for an application — every consumer is in-repo — and inverts
+for a library, whose callers are outside it by definition. A library's entire
+public API can look like drift. Try it on privata itself: it is clean, but move
+`privata-scm-1.rockspec` aside and its whole documented API is flagged, because
+the rockspec's `build.modules` was the only thing saying which module consumers
+require.
+
+The in-band answer is `entrypoint_modules`, which does not depend on packaging:
+
+```lua
+return { entrypoint_modules = { "mylib", "mylib.cli" } }
+```
+
+A deliberate API not yet called, a hook point kept for extension, a function
+published for downstream consumers who are not in this checkout — none of that
+is recoverable from the code, and privata does not pretend otherwise.
+
+**Whether test usage should count is a position, not a derivation.** privata
+holds that it does not establish publicness but does constrain which
+privatisation is legal. An application team usually wants that; a library team
+may reasonably want the opposite. It is a choice, documented as one.
 
 ## Library use
 

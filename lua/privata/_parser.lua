@@ -619,6 +619,7 @@ function _P.parse_table(state)
           kind = "String",
           value = field_token.value,
           raw = field_token.value,
+          synthetic = true,
           line = field_token.line,
         },
         value = _P.parse_expression(state),
@@ -693,6 +694,12 @@ function _P.identifier(token)
   return { kind = "Identifier", name = token.value, line = token.line, col = token.col }
 end
 
+--- Build `a.b`, whose field name is stored as a String node.
+--
+-- `synthetic` marks it as a name the parser turned into a string, not a string
+-- literal the author wrote. Checks that scan string contents for dispatch --
+-- `v:lua.foo`, a name in a lookup table -- must not see every field access in
+-- the file as a string mentioning that field.
 function _P.index_node(object, field_token, computed)
   return {
     kind = "Index",
@@ -701,6 +708,7 @@ function _P.index_node(object, field_token, computed)
       kind = "String",
       value = field_token.value,
       raw = field_token.value,
+      synthetic = true,
       line = field_token.line,
     },
     computed = computed,

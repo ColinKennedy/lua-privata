@@ -196,6 +196,12 @@ function _P.extract_symbols(module_record)
     }
   end
 
+  -- A side-effect module publishes no interface, so there is nothing here to
+  -- report. Its references still reach the rest of the scan through its chunk.
+  if detected.kind == shape.KINDS.SIDE_EFFECT then
+    return symbols, private_symbols
+  end
+
   if detected.kind == shape.KINDS.LITERAL then
     -- A literal that is not a re-export list is data, not an interface. Its
     -- fields cannot be made private without deleting them.
@@ -249,14 +255,23 @@ function _P.load_module(path, root, module_name, config)
     return nil, { module = module_name, path = path, line = 0, message = read_error }
   end
 
+  local ignored = _P.ignored_lines(source)
+
   local chunk, parse_error = parser.parse(source)
   if chunk == nil then
+    local failure = parse_error or { line = 0, message = "syntax error" }
+    -- A line-scoped ignore suppresses the *report*, not its consequence: the
+    -- file still contributes no references. That is the author's call to make,
+    -- and it is the same call `--skip-unparsable-files` makes project-wide.
+    if ignored[failure.line] then
+      return nil, nil
+    end
     return nil,
       {
         module = module_name,
         path = path,
-        line = parse_error.line,
-        message = parse_error.message,
+        line = failure.line,
+        message = failure.message,
       }
   end
 
@@ -266,7 +281,7 @@ function _P.load_module(path, root, module_name, config)
     source_root = root,
     package_parts = source_roots.package_parts(module_name),
     chunk = chunk,
-    ignored_lines = _P.ignored_lines(source),
+    ignored_lines = ignored,
     shape = shape.detect(chunk, config),
     scope = scope.analyze(chunk),
     symbols = {},
@@ -345,9 +360,11 @@ function M.collect(roots, config, project_root, options)
     local entry = files[i]
     local record, failure = _P.load_module(entry.path, entry.root, entry.module_name, config)
     if record == nil then
-      unparsable[#unparsable + 1] = failure
+      if failure ~= nil then
+        unparsable[#unparsable + 1] = failure
+      end
     else
-      if record.shape.kind == nil then
+      if record.shape.kind == nil and not record.ignored_lines[record.shape.line or 1] then
         unanalyzable[#unanalyzable + 1] = {
           module = entry.module_name,
           path = entry.path,

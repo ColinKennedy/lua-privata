@@ -44,8 +44,19 @@ function _P.note_function_scope(state, scope)
   end
 end
 
-function _P.record_global_assignment(state, name, line, kind)
-  state.assigned[#state.assigned + 1] = { name = name, line = line, kind = kind }
+--- `explicit` distinguishes `_G.foo = ...` from a missing `local`.
+--
+-- They are different mistakes, and only one of them is a mistake. Writing `_G.`
+-- is a declaration -- often the only way to reach a name from a host that can
+-- see nothing else -- while `function foo()` with no `local` is an accident.
+-- Telling the first "this should be local" is wrong advice.
+function _P.record_global_assignment(state, name, line, kind, explicit)
+  state.assigned[#state.assigned + 1] = {
+    name = name,
+    line = line,
+    kind = kind,
+    explicit = explicit or false,
+  }
 end
 
 function _P.visit_expression(state, node, scope)
@@ -94,11 +105,9 @@ function _P.visit_target(state, node, scope, kind)
     return
   end
 
-  -- `_G.name = ...` is the explicit spelling of the same thing, and says so
-  -- deliberately enough that it would be perverse not to report it.
   local dotted = ast.dotted_name(node)
   if dotted and dotted:sub(1, 3) == "_G." and not _P.resolves(scope, "_G") then
-    _P.record_global_assignment(state, dotted:sub(4), node.field_line or node.line, kind)
+    _P.record_global_assignment(state, dotted:sub(4), node.field_line or node.line, kind, true)
     return
   end
 

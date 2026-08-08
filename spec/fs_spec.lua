@@ -3,33 +3,33 @@ local fs = require("privata._fs")
 describe("fs", function()
   describe("normalize", function()
     it("collapses redundant segments and separators", function()
-      assert.equals("a/c", fs.normalize("a/./b/../c/"))
-      assert.equals("a/b", fs.normalize("a//b"))
-      assert.equals("a/b", fs.normalize("a\\b"))
+      assert.equal("a/c", fs.normalize("a/./b/../c/"))
+      assert.equal("a/b", fs.normalize("a//b"))
+      assert.equal("a/b", fs.normalize("a\\b"))
     end)
 
     it("keeps a leading slash", function()
-      assert.equals("/a/b", fs.normalize("/a/./b"))
+      assert.equal("/a/b", fs.normalize("/a/./b"))
     end)
 
     it("keeps leading .. it cannot resolve", function()
-      assert.equals("../a", fs.normalize("../a"))
+      assert.equal("../a", fs.normalize("../a"))
     end)
 
     it("reduces an empty path to .", function()
-      assert.equals(".", fs.normalize("./"))
+      assert.equal(".", fs.normalize("./"))
     end)
   end)
 
   describe("relative", function()
     it("strips the root prefix", function()
-      assert.equals("privata/_fs.lua", fs.relative("lua/privata/_fs.lua", "lua"))
+      assert.equal("privata/_fs.lua", fs.relative("lua/privata/_fs.lua", "lua"))
     end)
 
     it("treats a . root as containing every relative path", function()
       -- Scans are routinely rooted at the current directory, and "spec/x.lua"
       -- does not begin with "./", so prefix matching alone gets this wrong.
-      assert.equals("spec/x.lua", fs.relative("spec/x.lua", "."))
+      assert.equal("spec/x.lua", fs.relative("spec/x.lua", "."))
     end)
 
     it("returns nil for an absolute path under a . root", function()
@@ -41,7 +41,7 @@ describe("fs", function()
     end)
 
     it("returns . for the root itself", function()
-      assert.equals(".", fs.relative("lua", "lua"))
+      assert.equal(".", fs.relative("lua", "lua"))
     end)
   end)
 
@@ -54,23 +54,23 @@ describe("fs", function()
 
   describe("basename and dirname", function()
     it("splits a path", function()
-      assert.equals("_fs.lua", fs.basename("lua/privata/_fs.lua"))
-      assert.equals("lua/privata", fs.dirname("lua/privata/_fs.lua"))
+      assert.equal("_fs.lua", fs.basename("lua/privata/_fs.lua"))
+      assert.equal("lua/privata", fs.dirname("lua/privata/_fs.lua"))
     end)
 
     it("handles a bare name", function()
-      assert.equals("x.lua", fs.basename("x.lua"))
-      assert.equals(".", fs.dirname("x.lua"))
+      assert.equal("x.lua", fs.basename("x.lua"))
+      assert.equal(".", fs.dirname("x.lua"))
     end)
   end)
 
   describe("join", function()
     it("joins without doubling separators", function()
-      assert.equals("a/b/c", fs.join("a/", "b", "c"))
+      assert.equal("a/b/c", fs.join("a/", "b", "c"))
     end)
 
     it("ignores empty parts", function()
-      assert.equals("a/b", fs.join("a", "", "b"))
+      assert.equal("a/b", fs.join("a", "", "b"))
     end)
   end)
 
@@ -81,7 +81,7 @@ describe("fs", function()
       for i = 2, #files do
         assert.is_true(files[i - 1] < files[i])
       end
-      assert.equals("lua/privata/_ast.lua", files[1])
+      assert.equal("lua/privata/_ast.lua", files[1])
     end)
 
     it("prunes a directory by name before descending", function()
