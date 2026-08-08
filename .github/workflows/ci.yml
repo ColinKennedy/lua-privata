@@ -27,7 +27,11 @@ jobs:
         with:
           luaVersion: ${{ matrix.lua }}
 
-      - uses: leafo/gh-actions-luarocks@v4
+      # v6 defaults to LuaRocks 3.13; v4 pinned 3.8, which cannot install
+      # anything under LuaJIT any more. LuaJIT caps a function at 65536
+      # constants and luarocks.org's Lua 5.1 manifest has outgrown that, so
+      # every rock lookup died on "main function has more than 65536 constants".
+      - uses: leafo/gh-actions-luarocks@v6
 
       - name: Install test dependencies
         run: |
@@ -57,7 +61,7 @@ jobs:
         with:
           luaVersion: "5.4"
 
-      - uses: leafo/gh-actions-luarocks@v4
+      - uses: leafo/gh-actions-luarocks@v6
 
       - run: luarocks install luacheck
       - run: make luacheck
@@ -77,7 +81,7 @@ jobs:
         with:
           luaVersion: "5.4"
 
-      - uses: leafo/gh-actions-luarocks@v4
+      - uses: leafo/gh-actions-luarocks@v6
 
       # llscheck drives lua-language-server, which is a separate binary.
       - uses: jdx/mise-action@v2
@@ -99,7 +103,7 @@ jobs:
         with:
           luaVersion: "5.4"
 
-      - uses: leafo/gh-actions-luarocks@v4
+      - uses: leafo/gh-actions-luarocks@v6
 
       - name: Install test dependencies
         run: |
