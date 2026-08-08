@@ -60,7 +60,16 @@ describe("lexer", function()
 
   describe("numbers", function()
     it("reads decimals, floats and exponents", function()
-      assert.same({ "number:1", "number:1.5", "number:1000" }, types_and_values("1 1.5 1e3"))
+      assert.same({ "number:1", "number:1.5" }, types_and_values("1 1.5"))
+
+      -- Asserted as a value rather than as text, because Lua 5.3 gave numbers an
+      -- integer subtype: `1e3` is a float there and prints as "1000.0", while
+      -- 5.1, 5.2 and LuaJIT print "1000". Both are the same number, and privata
+      -- never evaluates arithmetic, so pinning the spelling would be testing the
+      -- interpreter rather than the lexer.
+      local exponent = tokens("1e3")[1]
+      assert.equal(1000, exponent.value)
+      assert.equal("1e3", exponent.raw)
     end)
 
     it("reads a leading-dot float", function()
