@@ -20,6 +20,8 @@ local M = {}
 local _P = {}
 
 --- Resolve the module name a `require` call names, or nil when computed.
+---@param node privata.Node  an expression node
+---@return string|nil  the dotted module name, or nil when it is not a literal
 function _P.required_module(node)
   if node.kind ~= "Call" then
     return nil
@@ -43,6 +45,9 @@ end
 --
 -- The third binds a name directly to a symbol, which is a use of that symbol
 -- on its own, so it is reported through `direct` rather than `aliases`.
+---@param chunk privata.Node  a Chunk node
+---@return table<string, string> aliases  local name to the module it holds
+---@return { module: string, name: string, line: integer }[] direct
 function _P.require_bindings(chunk)
   local aliases = {}
   local direct = {}
@@ -51,7 +56,9 @@ function _P.require_bindings(chunk)
     if node.kind ~= "LocalDeclaration" and node.kind ~= "Assignment" then
       return
     end
+    -- Both kinds bind a list of names; only the field they keep it under differs.
     local names = node.kind == "LocalDeclaration" and node.names or node.targets
+    ---@cast names privata.Node[]
     for i = 1, #names do
       local target = names[i]
       local value = node.values[i]
@@ -87,6 +94,8 @@ local REQUIRE_IN_STRING = "require%s*%(?%s*[\"'`]?([%w_%.%-]+)[\"'`]?%s*%)?%s*%.
 local VIM_LUA_GLOBAL = "v:lua%.([%w_]+)"
 
 --- Module-field references written inside string literals.
+---@param chunk privata.Node  a Chunk node
+---@return { module: string, name: string, line: integer }[]
 function M.string_references(chunk)
   local found = {}
   ast.walk(chunk, function(node)
@@ -105,6 +114,8 @@ end
 -- `%{v:lua.get_winbar()%}` in a statusline or winbar expression can only reach
 -- `_G`, so a deliberate `_G.get_winbar = ...` shim is the one line in such a
 -- file that *must* be global.
+---@param chunk privata.Node  a Chunk node
+---@return table<string, integer>  global name to the line mentioning it
 function M.vim_lua_globals(chunk)
   local found = {}
   ast.walk(chunk, function(node)
@@ -140,9 +151,15 @@ end
 --
 -- A name assembled at runtime (`"run_" .. mode`) is still invisible, and always
 -- will be. `-- privata: ignore` is the answer there.
+---@param chunk privata.Node  a Chunk node
+---@param path string  file the strings were found in, carried into the report
+---@return table<string, { path: string, line: integer }>  first sighting per name
 function M.string_dispatch_names(chunk, path)
   local found = {}
 
+  -- First sighting wins, so the reported line is the earliest in the file.
+  ---@param name string
+  ---@param line integer
   local function record(name, line)
     if found[name] == nil then
       found[name] = { path = path, line = line }
@@ -171,6 +188,8 @@ end
 -- `M.name(...)` picks up the stub because the call goes through the table at
 -- call time, so the indirection through `M` *is* the seam -- and privatising the
 -- field removes the injection point rather than merely making it untestable.
+---@param chunk privata.Node  a Chunk node
+---@return { module: string, name: string, line: integer }[]
 function M.field_assignments(chunk)
   local aliases = _P.require_bindings(chunk)
   local found = {}
@@ -183,6 +202,7 @@ function M.field_assignments(chunk)
       local target = node.targets[i]
       if target.kind == "Index" and not target.computed and target.index.kind == "String" then
         local object = target.object
+        ---@cast object privata.Node
         if object.kind == "Identifier" and aliases[object.name] then
           found[#found + 1] = {
             module = aliases[object.name],
@@ -203,11 +223,18 @@ end
 --   m.field            through a local bound to the module
 --   require("m").field inline, with no local at all
 --   m:method()         a call through the module table
+---@param chunk privata.Node  a Chunk node
+---@return { module: string, name: string, line: integer }[]  deduplicated
 function M.references(chunk)
   local aliases, direct = _P.require_bindings(chunk)
   local used = {}
   local seen = {}
 
+  -- Deduplicated on (module, field): a symbol read twice is still one symbol
+  -- kept public, and the report names the first line that reads it.
+  ---@param module_name string|nil
+  ---@param field string|nil
+  ---@param line integer
   local function record(module_name, field, line)
     if module_name == nil or field == nil then
       return
@@ -234,6 +261,7 @@ function M.references(chunk)
   ast.walk(chunk, function(node)
     if node.kind == "Index" and not node.computed and node.index.kind == "String" then
       local object = node.object
+      ---@cast object privata.Node
       if object.kind == "Identifier" and aliases[object.name] then
         record(aliases[object.name], node.index.value, node.field_line or node.line)
       else
@@ -244,6 +272,7 @@ function M.references(chunk)
       end
     elseif node.kind == "MethodCall" then
       local object = node.object
+      ---@cast object privata.Node
       if object.kind == "Identifier" and aliases[object.name] then
         record(aliases[object.name], node.method, node.method_line or node.line)
       else
@@ -259,6 +288,8 @@ function M.references(chunk)
 end
 
 --- Modules a chunk requires, whether or not it reads a field from them.
+---@param chunk privata.Node  a Chunk node
+---@return { module: string, line: integer }[]  one entry per module, first line
 function _P.required_modules(chunk)
   local out = {}
   local seen = {}
@@ -277,6 +308,9 @@ end
 -- Returns a set keyed `"module\0name"`. Consumers default to the modules
 -- themselves; the test-helper rule passes a separate consumer list so that
 -- files in a test root can certify helpers without certifying production code.
+---@param modules table<string, privata.Module>  the modules whose symbols matter
+---@param consumers table<string, privata.Module>|nil  who may certify them
+---@return table<string, boolean>  set keyed `"module\0name"`
 function M.cross_references(modules, consumers)
   local used = {}
   consumers = consumers or modules
@@ -299,6 +333,9 @@ function M.cross_references(modules, consumers)
 end
 
 --- The same, for a list of consumer records rather than a name-keyed map.
+---@param modules table<string, privata.Module>
+---@param consumer_list privata.Consumer[]
+---@return table<string, boolean>  set keyed `"module\0name"`
 function M.cross_references_from(modules, consumer_list)
   local used = {}
   for i = 1, #consumer_list do
@@ -317,6 +354,9 @@ function M.cross_references_from(modules, consumer_list)
 end
 
 --- True when a module name has a segment matching one of the private patterns.
+---@param module_name string   dotted module name
+---@param patterns string[]    Lua patterns matched against each segment
+---@return boolean
 function _P.is_private_module(module_name, patterns)
   for segment in module_name:gmatch("[^.]+") do
     for i = 1, #patterns do
@@ -335,6 +375,10 @@ end
 -- `pkg`, so `pkg.cli` may reach into it. Taking the immediate parent instead
 -- would make a private subpackage unreachable from the package that owns it,
 -- which is the opposite of what marking it private was meant to achieve.
+---@param module_name string
+---@param patterns string[]
+---@return string|nil  the owning package, the module itself when not private,
+---                    or nil when the first segment is already private
 function _P.owning_package(module_name, patterns)
   local parts = {}
   for segment in module_name:gmatch("[^.]+") do
@@ -365,6 +409,10 @@ end
 --
 -- Off by default. For a library, a sibling reaching into `pkg.other._helper` is
 -- still worth knowing about; only the project can say which it is.
+---@param owner string       module the name belongs to
+---@param reader string      module doing the reading
+---@param prefixes string[]  configured package-private prefixes
+---@return boolean
 function _P.shares_package(owner, reader, prefixes)
   for i = 1, #prefixes do
     local prefix = prefixes[i]
@@ -375,6 +423,12 @@ function _P.shares_package(owner, reader, prefixes)
   return false
 end
 
+--- True when `module_name` is `package_name` or sits beneath it.
+--
+-- The `.` is required so `pkg.other` is not read as being inside `pkg.o`.
+---@param module_name string
+---@param package_name string
+---@return boolean
 function _P.is_within_package(module_name, package_name)
   return module_name == package_name or module_name:sub(1, #package_name + 1) == package_name .. "."
 end
@@ -383,6 +437,10 @@ end
 --
 -- Modules living in a test root are skipped: tests are allowed to reach
 -- internals, which is the same rule that stops their usage conferring publicity.
+---@param modules table<string, privata.Module>
+---@param patterns string[]              patterns marking a module segment private
+---@param package_private string[]|nil   prefixes within which such reads are allowed
+---@return privata.PrivateModuleRequireFinding[] findings
 function M.private_module_requires(modules, patterns, package_private)
   package_private = package_private or {}
   local findings = {}
@@ -421,6 +479,9 @@ end
 --
 -- Covers both spellings of "private" that a Lua module has: a `_`-prefixed
 -- field on the public table, and any field on the private namespace table.
+---@param modules table<string, privata.Module>
+---@param package_private string[]|nil  prefixes within which such reads are allowed
+---@return privata.PrivateSymbolReadFinding[] findings
 function M.private_symbol_reads(modules, package_private)
   package_private = package_private or {}
   local private_by_module = {}

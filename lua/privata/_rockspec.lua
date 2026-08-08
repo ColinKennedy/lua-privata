@@ -22,6 +22,8 @@ local _P = {}
 -- A checkout usually holds one; when it holds several, the `scm`/`dev` one
 -- describes the working tree and the version-pinned ones describe releases, so
 -- the development one wins.
+---@param project_root string
+---@return string|nil  path to the winning rockspec, or nil when there is none
 function _P.find(project_root)
   local names = {}
   local pipe = io.popen
@@ -45,11 +47,20 @@ function _P.find(project_root)
   return names[1]
 end
 
+--- Quote a path for the shell, so a directory name cannot alter the command.
+---@param path string
+---@return string quoted
 function _P.quote(path)
   return "'" .. path:gsub("'", "'\\''") .. "'"
 end
 
 --- Load a rockspec's literal top-level assignments, or nil plus a reason.
+--
+-- The winning rockspec's path is stashed under `rockspec_path`, since callers
+-- report against the file and would otherwise have to find it a second time.
+---@param project_root string
+---@return table<string, any>|nil data
+---@return string|nil reason  set only when `data` is nil
 function _P.load(project_root)
   local path = _P.find(project_root)
   if not path then
@@ -68,6 +79,8 @@ function _P.load(project_root)
 end
 
 --- The `build.modules` map, as module name to file path.
+---@param project_root string
+---@return table<string, string>  module name to normalized path; empty when unreadable
 function _P.modules(project_root)
   local data = _P.load(project_root)
   if not data or type(data.build) ~= "table" then
@@ -94,6 +107,8 @@ end
 -- Deepest paths are dropped in favour of their ancestors, so a rockspec listing
 -- `lua/pkg/a.lua` and `lua/pkg/sub/b.lua` yields one root, not two nested ones
 -- that would make every file appear twice under two module names.
+---@param project_root string
+---@return string[]  source roots, sorted, with nested ones dropped
 function M.module_directories(project_root)
   local modules = _P.modules(project_root)
   local roots = {}
@@ -147,6 +162,8 @@ end
 --
 -- Common decorations are stripped because rock names and module names drift:
 -- `lua-cjson` ships `cjson`, `foo.lua` ships `foo`.
+---@param project_root string
+---@return string[]  candidate module names, sorted
 function M.api_module_names(project_root)
   local data = _P.load(project_root)
   if not data or type(data.package) ~= "string" then
@@ -171,6 +188,8 @@ end
 --
 -- Every script in `build.install.bin` is reachable from a shell, so the module
 -- it lives in is public no matter what the rest of the project does with it.
+---@param project_root string
+---@return string[]  script paths, sorted
 function M.installed_scripts(project_root)
   local data = _P.load(project_root)
   if not data or type(data.build) ~= "table" then

@@ -49,6 +49,15 @@ local OPTIONS = {
 }
 
 --- Parse argv into a project root and a config overlay.
+--
+-- The three results are correlated: on success `problem` is nil and the other
+-- two are set; on failure only `problem` is. "help" and "version" travel as
+-- problems because they too mean "do not run a scan", and giving them their own
+-- channel would put a third state in every caller.
+---@param argv string[]
+---@return string|nil project_root  defaults to "." when argv names none
+---@return table|nil overrides      config overlay built from the flags
+---@return string|nil problem       an error message, or "help" / "version"
 function _P.parse_arguments(argv)
   local overrides = {}
   local project_root = nil
@@ -89,12 +98,21 @@ function _P.parse_arguments(argv)
   return project_root or ".", overrides
 end
 
+--- Write a line to a stream.
+--
+-- Takes the stream rather than reaching for `io.stdout`, so specs can capture
+-- output by passing their own table instead of redirecting a real file handle.
+---@param stream file*|table  anything with a `write` method
+---@param text string
 function _P.write(stream, text)
   stream:write(text)
   stream:write("\n")
 end
 
 --- Run privata. Returns an exit code.
+---@param argv string[]|nil       defaults to no arguments
+---@param io_streams table|nil    `{ out = ..., err = ... }`; defaults to the real streams
+---@return integer  0 clean, 1 findings, 2 bad usage or configuration
 function M.main(argv, io_streams)
   local out = (io_streams and io_streams.out) or io.stdout
   local err = (io_streams and io_streams.err) or io.stderr
@@ -115,6 +133,9 @@ function M.main(argv, io_streams)
     return _P.EXIT_USAGE
   end
 
+  -- Past the `problem` guard above, the root is always set: the paths that
+  -- leave it nil are exactly the paths that set a problem.
+  ---@cast project_root string
   project_root = fs.normalize(project_root)
   if not fs.is_dir(project_root) then
     _P.write(err, "privata: not a directory: " .. project_root)

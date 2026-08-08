@@ -14,11 +14,18 @@ local _P = {}
 local INDENT = "      "
 local WIDTH = 94
 
+--- Path relative to the project root, or the path itself when it lies outside.
+---@param path string
+---@param project_root string
+---@return string
 function _P.relative(path, project_root)
   return fs.relative(path, project_root) or path
 end
 
 --- Wrap a comma-joined list so the indented detail lines stay readable.
+---@param items string[]
+---@param width integer  the budget for one line, excluding its indent
+---@return string[]  one entry per output line; empty when `items` is
 function _P.wrap(items, width)
   local lines = {}
   local current = ""
@@ -39,6 +46,9 @@ function _P.wrap(items, width)
   return lines
 end
 
+--- Start a section, separated from whatever came before it.
+---@param out string[]  appended to in place
+---@param heading string
 function _P.section(out, heading)
   if #out > 0 then
     out[#out + 1] = ""
@@ -47,6 +57,14 @@ function _P.section(out, heading)
   out[#out + 1] = ""
 end
 
+--- Report files that could not be parsed.
+--
+-- Worded as an error or a warning depending on the config, because a skipped
+-- file still stops contributing references either way.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.UnparsableFinding[]
+---@param project_root string  paths are printed relative to this
+---@param config privata.Config
 function _P.unparsable(out, findings, project_root, config)
   local verb = config.skip_unparsable_files and "warning" or "error"
   _P.section(
@@ -65,6 +83,11 @@ function _P.unparsable(out, findings, project_root, config)
   end
 end
 
+--- Report module names claimed by more than one file.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.CollisionFinding[]
+---@param project_root string  paths are printed relative to this
+---@param config privata.Config
 function _P.collisions(out, findings, project_root, config)
   local verb = config.skip_module_collisions and "warning" or "error"
   _P.section(
@@ -87,6 +110,10 @@ function _P.collisions(out, findings, project_root, config)
   end
 end
 
+--- Report files whose module shape privata declined to guess at.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.UnanalyzableFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.unanalyzable(out, findings, project_root)
   _P.section(
     out,
@@ -109,6 +136,12 @@ end
 -- privata could say about the file follows from this being fixed first, and the
 -- remedy is spelled out rather than implied: a reader -- or a tool acting on the
 -- report -- should not have to infer what to rename it to.
+--
+-- Split into two groups so an advisory finding never leads: it is a clean bill
+-- of health, and printing it alongside the blocking ones reads as a queue.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.ExportedNamespaceFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.exported_namespaces(out, findings, project_root)
   local blocking, advisory = {}, {}
   for i = 1, #findings do
@@ -124,6 +157,11 @@ function _P.exported_namespaces(out, findings, project_root)
   end
 end
 
+--- Print one group of exported-namespace findings, with its own heading.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.ExportedNamespaceFinding[]  all of one severity
+---@param project_root string  paths are printed relative to this
+---@param blocking boolean  false for the advisory group, which never fails a run
 function _P.exported_namespace_group(out, findings, project_root, blocking)
   _P.section(
     out,
@@ -192,6 +230,13 @@ function _P.exported_namespace_group(out, findings, project_root, blocking)
   end
 end
 
+--- Report public symbols nothing outside their module reads.
+--
+-- Each line carries the recommendation, the lines that read the symbol, and any
+-- caveat -- everything needed to act on it without opening the file.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.Symbol[]
+---@param project_root string  paths are printed relative to this
 function _P.symbols(out, findings, project_root)
   _P.section(
     out,
@@ -256,6 +301,10 @@ function _P.symbols(out, findings, project_root)
   end
 end
 
+--- Report global bindings.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.GlobalFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.globals(out, findings, project_root)
   _P.section(
     out,
@@ -280,6 +329,10 @@ function _P.globals(out, findings, project_root)
   end
 end
 
+--- Report requires of a private module from outside its owning package.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.PrivateModuleRequireFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.private_module_requires(out, findings, project_root)
   _P.section(
     out,
@@ -304,6 +357,10 @@ end
 -- One private name read by eight sibling modules is a single design fact, not
 -- eight boundary violations, and printing it eight times buries that. The
 -- fan-out is the interesting number, so it leads.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.PrivateSymbolReadFinding[]
+---@param project_root string  paths are printed relative to this
+---@param config privata.Config|nil  consulted only to mention `package_private`
 function _P.private_symbol_reads(out, findings, project_root, config)
   local groups = {}
   local order = {}
@@ -355,6 +412,10 @@ function _P.private_symbol_reads(out, findings, project_root, config)
   end
 end
 
+--- Report stale or private entries in a literal export table.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.ExportIssueFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.export_issues(out, findings, project_root)
   _P.section(out, string.format("Found %s:", models.count(#findings, "export table issue")))
   for i = 1, #findings do
@@ -372,6 +433,10 @@ function _P.export_issues(out, findings, project_root)
   end
 end
 
+--- Report public methods nothing refers to, grouped by the class holding them.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.Method[]
+---@param project_root string  paths are printed relative to this
 function _P.methods(out, findings, project_root)
   local groups = {}
   local order = {}
@@ -420,6 +485,10 @@ function _P.methods(out, findings, project_root)
 end
 
 --- Render findings as text.
+---@param findings privata.Findings
+---@param project_root string  paths are printed relative to this
+---@param config privata.Config
+---@return string  the whole report, or a single clean-run line
 function M.render(findings, project_root, config)
   local out = {}
 

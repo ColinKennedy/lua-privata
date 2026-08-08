@@ -22,6 +22,8 @@ local SEPARATOR = package.config:sub(1, 1)
 -- Detection order is capability order, not preference: a host that has `vim.uv`
 -- is running inside Neovim, where spawning `find` per directory would be the
 -- slowest possible choice.
+---@return string backend       one of "uv", "lfs", "popen"
+---@return table|nil library    the backend's library, nil for "popen"
 function _P.detect()
   local vim_global = rawget(_G, "vim")
   if type(vim_global) == "table" then
@@ -55,10 +57,19 @@ _P.backend = BACKEND
 
 --- Quote a path for the shell, so a directory name with a space or a quote in
 --- it cannot alter the command privata runs.
+---@param path string
+---@return string quoted  single-quoted, safe to interpolate into a command
 function _P.shell_quote(path)
   return "'" .. path:gsub("'", "'\\''") .. "'"
 end
 
+--- Join path segments with the host's separator.
+--
+-- Empty and nil segments are dropped rather than producing a doubled
+-- separator, so a caller can pass an optional subdirectory without first
+-- deciding whether it has one.
+---@param ... string|nil  path segments
+---@return string
 function M.join(...)
   local parts = { ... }
   local out = parts[1] or ""
@@ -80,6 +91,8 @@ end
 --
 -- Paths become table keys and are compared to decide whether a file sits under
 -- a source root, so two spellings of one path must not read as two places.
+---@param path string
+---@return string
 function M.normalize(path)
   path = path:gsub("\\", "/")
   local absolute = path:sub(1, 1) == "/"
@@ -98,10 +111,16 @@ function M.normalize(path)
   return joined == "" and "." or joined
 end
 
+--- The last segment of a path.
+---@param path string
+---@return string
 function M.basename(path)
   return (M.normalize(path):gsub(".*/", ""))
 end
 
+--- The parent of a path: "." for a bare filename, "/" at the filesystem root.
+---@param path string
+---@return string
 function M.dirname(path)
   local normalized = M.normalize(path)
   local parent = normalized:match("^(.*)/[^/]*$")
@@ -114,6 +133,9 @@ end
 --- True when `path` sits inside `root`, or is `root` itself.
 --
 -- Compares whole segments so `lua/spec` is not read as being inside `lua/spe`.
+---@param path string
+---@param root string
+---@return boolean
 function M.is_within(path, root)
   return M.relative(path, root) ~= nil
 end
@@ -123,6 +145,9 @@ end
 -- A root of "." contains every relative path, which is not something prefix
 -- matching can see: "spec/x.lua" does not start with "./". Scans are routinely
 -- rooted at the current directory, so this case is the common one, not an edge.
+---@param path string
+---@param root string
+---@return string|nil  the relative path, "." when equal, nil when outside
 function M.relative(path, root)
   path, root = M.normalize(path), M.normalize(root)
   if path == root then
@@ -142,6 +167,14 @@ function M.relative(path, root)
   return nil
 end
 
+--- Read a whole file as a string.
+--
+-- Opened in binary mode so a CRLF checkout is not silently rewritten on the way
+-- in: the lexer counts lines itself, and a translated newline would shift every
+-- line number in the report.
+---@param path string
+---@return string|nil content
+---@return string|nil error    set only when `content` is nil
 function M.read_file(path)
   local handle, err = io.open(path, "rb")
   if not handle then
@@ -155,11 +188,20 @@ function M.read_file(path)
   return content
 end
 
+--- The libuv stat type of `path`, or nil when it cannot be stat'ed.
+---@param path string
+---@return string|nil  "file", "directory", ... as libuv reports it
 function _P.uv_stat_type(path)
   local stat = LIB.fs_stat(path)
   return stat and stat.type or nil
 end
 
+--- True when `path` is a directory.
+--
+-- The popen fallback asks `find` rather than trying to open the path, because
+-- opening a directory succeeds on some platforms and fails on others.
+---@param path string
+---@return boolean
 function M.is_dir(path)
   if BACKEND == "uv" then
     return _P.uv_stat_type(path) == "directory"
@@ -175,6 +217,12 @@ function M.is_dir(path)
   return output ~= nil and output ~= ""
 end
 
+--- True when `path` is a regular file.
+--
+-- The popen fallback opens the path and then rules out a directory, since a
+-- successful open proves only that something is there.
+---@param path string
+---@return boolean
 function M.is_file(path)
   if BACKEND == "uv" then
     return _P.uv_stat_type(path) == "file"
@@ -189,6 +237,8 @@ function M.is_file(path)
   return not M.is_dir(path)
 end
 
+--- The current working directory, normalized. Falls back to "." if unreadable.
+---@return string
 function M.cwd()
   if BACKEND == "uv" then
     return M.normalize(LIB.cwd())
@@ -208,6 +258,8 @@ end
 ---
 --- Only the scandir-capable backends implement this; the popen backend answers
 --- the one question privata actually asks with a single `find`.
+---@param path string
+---@return { name: string, type: string }[]  empty when `path` cannot be read
 function _P.entries(path)
   local out = {}
   if BACKEND == "uv" then
@@ -239,6 +291,15 @@ function _P.entries(path)
   return out
 end
 
+--- Recursively collect `.lua` files under `dir`, appending to `out`.
+--
+-- Entries are sorted before descending so the accumulated order is the same on
+-- every filesystem, not merely sorted once at the end: a caller that stops
+-- early still sees a deterministic prefix.
+---@param dir string                     directory currently being walked
+---@param root string                    scan root, for relative paths given to `skip_dir`
+---@param skip_dir nil|fun(name: string, relative: string|nil): boolean
+---@param out string[]                   accumulator, appended to in place
 function _P.walk_lua_files(dir, root, skip_dir, out)
   local entries = _P.entries(dir)
   table.sort(entries, function(a, b)
@@ -262,6 +323,9 @@ end
 -- `skip_dir(name, relative_path)` prunes a directory before privata descends
 -- into it. Pruning rather than filtering afterwards matters on the popen
 -- backend too, where a vendored rock tree can hold more files than the project.
+---@param root string
+---@param skip_dir nil|fun(name: string, relative: string|nil): boolean
+---@return string[]  normalized paths, sorted; empty when `root` is not a directory
 function M.list_lua_files(root, skip_dir)
   local out = {}
   if not M.is_dir(root) then

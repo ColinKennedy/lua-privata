@@ -21,6 +21,7 @@ _P.FILENAME = ".privata.lua"
 -- strategy because that is the recommendation that always applies: demoting to
 -- a local can be illegal where a forward reference or the 200-local chunk limit
 -- gets in the way, and a recommendation that cannot be followed is noise.
+---@return privata.Config  a fresh table, safe for the caller to overlay onto
 function _P.defaults()
   return {
     preset = nil,
@@ -97,6 +98,8 @@ _P.LOCAL_FUNCTION_STYLES = { statement = true, assignment = true }
 --
 -- Walking up means privata run from inside a subdirectory of a project still
 -- honours the project's configuration, which is what every other Lua tool does.
+---@param start string  directory to begin the walk at
+---@return string|nil  path to `.privata.lua`, or nil when no ancestor has one
 function _P.find_file(start)
   local directory = fs.normalize(start)
   local seen = {}
@@ -115,6 +118,12 @@ function _P.find_file(start)
   return nil
 end
 
+--- Deep-copy a value, so one layer's tables are never aliased by the next.
+--
+-- Without this an overlay would hand the caller a list the defaults still point
+-- at, and a later mutation would reach back into the defaults table.
+---@param value any
+---@return any  a table is copied recursively; anything else is returned as is
 function _P.copy(value)
   if type(value) ~= "table" then
     return value
@@ -130,6 +139,9 @@ end
 --
 -- `checks` is the one table merged key-by-key rather than replaced, because a
 -- user disabling one check should not have to restate the other five.
+---@param base privata.Config  mutated in place
+---@param overlay table<string, any>|nil  ignored when it is not a table
+---@return privata.Config  the same `base`, for chaining
 function _P.overlay(base, overlay)
   if type(overlay) ~= "table" then
     return base
@@ -146,6 +158,14 @@ function _P.overlay(base, overlay)
   return base
 end
 
+--- Load a shipped preset by name.
+--
+-- A missing preset is an error rather than an empty overlay: a user who names
+-- one expects its settings, and silently ignoring a typo would scan differently
+-- than they asked without saying so.
+---@param name string|nil  nil means no preset, which is not an error
+---@return table<string, any>|nil preset
+---@return string|nil reason  set only when `preset` is nil
 function _P.load_preset(name)
   if name == nil then
     return {}, nil
@@ -160,6 +180,12 @@ function _P.load_preset(name)
   return preset
 end
 
+--- True for a table that is a dense array of strings and nothing else.
+--
+-- The key count is compared against the array length so a stray `{ "a", x = 1 }`
+-- is rejected rather than silently half-read.
+---@param value any
+---@return boolean
 function _P.is_string_list(value)
   if type(value) ~= "table" then
     return false
@@ -198,6 +224,9 @@ local STRING_LISTS = {
 -- A misspelled strategy or a `checks` key that does not exist would otherwise
 -- turn into a silently different scan, which is the failure mode this whole
 -- tool exists to argue against.
+---@param config privata.Config
+---@return privata.Config|nil config  nil when anything failed
+---@return string[]|nil problems  every problem found, not just the first
 function _P.validate(config)
   local problems = {}
 
@@ -288,6 +317,10 @@ end
 -- `overrides` carries command-line settings, which win over the file. Returns
 -- the config and the path of the file that contributed to it, or nil plus a
 -- list of problems.
+---@param project_root string
+---@param overrides table<string, any>|nil  command-line settings, which win
+---@return privata.Config|nil config
+---@return string|string[]|nil result  the config file's path, or the problems
 function M.load(project_root, overrides)
   local config = _P.defaults()
   local file_path = _P.find_file(project_root)

@@ -27,6 +27,8 @@ _P.STRATEGIES = {
 }
 
 --- The earliest line that reads the symbol, or nil when nothing does.
+---@param symbol privata.Symbol
+---@return integer|nil
 function _P.earliest_use(symbol)
   local earliest = nil
   for i = 1, #symbol.uses do
@@ -43,6 +45,8 @@ end
 -- `local function f` can call itself; `local f = function()` cannot, because
 -- the name is not in scope inside its own initialiser. So a recursive
 -- definition pins the statement form whatever the configured style says.
+---@param symbol privata.Symbol
+---@return boolean
 function _P.is_self_recursive(symbol)
   for i = 1, #symbol.uses do
     local line = symbol.uses[i]
@@ -54,6 +58,8 @@ function _P.is_self_recursive(symbol)
 end
 
 --- Whether demoting to a local would create a use-before-definition.
+---@param symbol privata.Symbol
+---@return boolean
 function _P.needs_forward_declaration(symbol)
   local earliest = _P.earliest_use(symbol)
   return earliest ~= nil and earliest < symbol.line
@@ -65,6 +71,9 @@ end
 -- that same name, but it is checked rather than trusted: the one thing this
 -- recommendation must never do is name some unrelated table that happens to
 -- exist in the file, which is exactly the bug that motivated the guard.
+---@param module_record privata.Module
+---@param config privata.Config
+---@return string  always `config.namespace`
 function _P.target_namespace(module_record, config)
   local detected = module_record.shape.private_name
   if detected ~= nil and detected == config.namespace then
@@ -73,6 +82,11 @@ function _P.target_namespace(module_record, config)
   return config.namespace
 end
 
+--- Recommend moving the symbol onto the private namespace table.
+---@param symbol privata.Symbol
+---@param module_record privata.Module
+---@param config privata.Config
+---@return privata.Recommendation
 function _P.namespace_recommendation(symbol, module_record, config)
   local namespace = _P.target_namespace(module_record, config)
   local notes = {}
@@ -93,6 +107,13 @@ function _P.namespace_recommendation(symbol, module_record, config)
   }
 end
 
+--- Recommend demoting the symbol to a file-local.
+--
+-- The wording follows what the symbol actually is: only a function can take the
+-- `local function` form, and a self-recursive one is pinned to it.
+---@param symbol privata.Symbol
+---@param config privata.Config
+---@return privata.Recommendation
 function _P.local_function_recommendation(symbol, config)
   local notes = {}
   local recursive = _P.is_self_recursive(symbol)
@@ -133,6 +154,8 @@ function _P.local_function_recommendation(symbol, config)
 end
 
 --- Relative path wording for a test location, kept short in the report.
+---@param location privata.Location
+---@return string  the last two path segments and a line, e.g. "spec/foo_spec.lua:12"
 function _P.where(location)
   return string.format("%s:%d", location.path:gsub(".*/([^/]+/[^/]+)$", "%1"), location.line)
 end
@@ -146,6 +169,8 @@ end
 -- call resolves through the table at call time. Privatising that field does not
 -- merely make it untestable, it deletes the seam -- so the honest report says
 -- the spec must change too, rather than handing over a rename that looks free.
+---@param symbol privata.Symbol
+---@return privata.Recommendation|nil  nil when no spec holds the field
 function _P.reachability_recommendation(symbol)
   if symbol.test_stub then
     return {
@@ -176,6 +201,9 @@ function _P.reachability_recommendation(symbol)
   return nil
 end
 
+--- Recommend the weakest form: keep the field, mark the name internal.
+---@param symbol privata.Symbol
+---@return privata.Recommendation
 function _P.underscore_recommendation(symbol)
   return {
     strategy = _P.STRATEGIES.UNDERSCORE_FIELD,
@@ -185,6 +213,11 @@ function _P.underscore_recommendation(symbol)
 end
 
 --- Whether a strategy can be applied to this symbol in this module.
+---@param strategy string  one of `_P.STRATEGIES`
+---@param symbol privata.Symbol
+---@param module_record privata.Module
+---@param config privata.Config
+---@return boolean
 function _P.is_applicable(strategy, symbol, module_record, config)
   if strategy == _P.STRATEGIES.NAMESPACE then
     -- A field cannot be moved into the table it is already on. This is not
@@ -219,6 +252,10 @@ end
 -- A symbol published by a literal `return { a = a }` table is a special case
 -- worth its own wording: the binding is already a local, so there is nothing to
 -- move -- only a line to delete.
+---@param symbol privata.Symbol
+---@param module_record privata.Module
+---@param config privata.Config
+---@return privata.Recommendation  never nil; the last resort is "stop exporting it"
 function M.for_symbol(symbol, module_record, config)
   if symbol.namespace == "return" then
     return {

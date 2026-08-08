@@ -12,6 +12,21 @@ local _P = {}
 
 local find, sub, byte, char = string.find, string.sub, string.byte, string.char
 
+---@class privata.Token
+---@field type string        "name", "number", "string", "keyword", "op" or "eof"
+---@field value any          the name, the numeric value, the decoded string, ...
+---@field line integer
+---@field col integer
+---@field raw string|nil     source text; carried by string and number tokens
+---@field long boolean|nil   true when a string came from a long bracket
+
+---@class privata.LexState
+---@field src string
+---@field pos integer         next byte to read, 1-based
+---@field line integer        line the scanner is on, 1-based
+---@field line_start integer  byte offset at which the current line begins
+---@field len integer         `#src`, cached because it is read per character
+
 --- Reserved words shared by every dialect privata accepts.
 --
 -- `goto` is deliberately absent. It is a keyword from 5.2 on but an ordinary
@@ -98,18 +113,31 @@ local SIMPLE_ESCAPES = {
 -- Thrown as a table with level 0 so the message survives without a "file:line:"
 -- prefix that would then be reported twice. `_modules` turns it into an
 -- UnparsableModule finding.
+---@param state privata.LexState
+---@param message string
 function _P.fail(state, message)
   error({ privata_syntax = true, line = state.line, message = message }, 0)
 end
 
+--- Fresh scanner state positioned at the first byte of `src`.
+---@param src string
+---@return privata.LexState
 function _P.new(src)
   return { src = src, pos = 1, line = 1, line_start = 1, len = #src }
 end
 
+--- The 1-based column of `pos` on the line the scanner is currently on.
+---@param state privata.LexState
+---@param pos integer
+---@return integer
 function _P.col(state, pos)
   return pos - state.line_start + 1
 end
 
+--- Consume the line break at `pos`, advancing the scanner onto the next line.
+---@param state privata.LexState
+---@param pos integer
+---@return integer width  bytes consumed: 2 for a paired break, otherwise 1
 function _P.newline(state, pos)
   -- Treat CRLF, LFCR, CR and LF alike: source lines are what privata reports
   -- and what `-- privata: ignore` is matched against, so a file written on
@@ -130,6 +158,8 @@ end
 --
 -- Hand-rolled because `utf8.char` arrived in 5.3 and privata itself must run
 -- on 5.1 and LuaJIT.
+---@param code integer  a Unicode code point
+---@return string       its UTF-8 encoding
 function _P.utf8_char(code)
   if code < 0x80 then
     return char(code)
@@ -151,6 +181,10 @@ function _P.utf8_char(code)
 end
 
 --- Measure a long-bracket opener at `pos`, returning its level or nil.
+---@param state privata.LexState
+---@param pos integer
+---@return integer|nil level       count of `=` signs, 0 for `[[`
+---@return integer|nil body_start  first byte after the opener
 function _P.long_bracket_level(state, pos)
   if byte(state.src, pos) ~= 91 then -- '['
     return nil
@@ -163,6 +197,11 @@ function _P.long_bracket_level(state, pos)
 end
 
 --- Read a long bracket body, which both long strings and long comments use.
+---@param state privata.LexState
+---@param level integer       level the opener declared, so the closer must match
+---@param body_start integer
+---@return string body        contents, without the brackets
+---@return integer after      first byte past the closer
 function _P.read_long(state, level, body_start)
   local close = "%]" .. string.rep("=", level) .. "%]"
   local pos = body_start
@@ -195,6 +234,15 @@ function _P.read_long(state, level, body_start)
   end
 end
 
+--- Read a quoted string, decoding escapes into the value.
+--
+-- The decoded value is what the checks compare against -- a name mentioned in a
+-- string literal is found by matching the value, not the source text -- so the
+-- escapes have to be resolved here rather than left for a consumer to redo.
+---@param state privata.LexState
+---@param quote integer   byte of the opening quote, matched to close it
+---@return string value   decoded contents
+---@return integer after  first byte past the closing quote
 function _P.read_short_string(state, quote)
   local pos = state.pos + 1
   local pieces = {}
@@ -290,6 +338,9 @@ end
 -- The numeric value is best-effort: privata never evaluates arithmetic, and
 -- `tonumber` on 5.1 cannot read a hex float. `raw` always holds the source
 -- text, which is what any check that cares about a literal actually uses.
+---@param state privata.LexState
+---@return { value: number|nil, raw: string } number  `value` is nil if unreadable
+---@return integer after  first byte past the numeral
 function _P.read_number(state)
   local src, pos = state.src, state.pos
   local _, e
@@ -317,9 +368,19 @@ function _P.read_number(state)
   return { value = tonumber(sub(src, pos, e)), raw = raw }, raw_end + 1
 end
 
+--- Skip a comment, long or short, and report where the source resumes.
+--
+-- A long comment can span lines, so it is read with the same routine as a long
+-- string: the line counter has to advance through it or every finding below
+-- would be reported against the wrong line.
+---@param state privata.LexState
+---@param pos integer     byte of the first `-` of the `--`
+---@return integer after  first byte past the comment
 function _P.skip_comment(state, pos)
   local level, body_start = _P.long_bracket_level(state, pos + 2)
   if level then
+    -- Both results are set together, so a level implies a body start.
+    ---@cast body_start integer
     local _, after = _P.read_long(state, level, body_start)
     return after
   end
@@ -332,6 +393,8 @@ end
 -- Each token is `{ type, value, line, col }`, where `type` is one of "name",
 -- "number", "string", "keyword", "op", "eof". String and number tokens carry a
 -- `raw` field holding their source text.
+---@param src string
+---@return privata.Token[]
 function M.tokenize(src)
   -- Lua itself skips a leading `#!` line when loading a file, so a bin script
   -- is ordinary source; privata must read it the same way.
@@ -349,6 +412,8 @@ function M.tokenize(src)
   local tokens = {}
   local count = 0
 
+  -- Appends by running count rather than `#tokens`, which is O(log n) per call.
+  ---@param token privata.Token
   local function push(token)
     count = count + 1
     tokens[count] = token
@@ -362,6 +427,8 @@ function M.tokenize(src)
     end
 
     local c = byte(src, pos)
+    -- The bounds check above already returned, so this byte is always present.
+    ---@cast c integer
 
     if c == 10 or c == 13 then
       _P.newline(state, pos)
@@ -373,6 +440,7 @@ function M.tokenize(src)
     elseif c == 91 then -- '['
       local level, body_start = _P.long_bracket_level(state, pos)
       if level then
+        ---@cast body_start integer
         local line = state.line
         local col = _P.col(state, pos)
         local value, after = _P.read_long(state, level, body_start)
@@ -416,6 +484,7 @@ function M.tokenize(src)
     elseif find(src, "^[%a_]", pos) then
       -- Guarded by the branch above, which already matched a leading name char.
       local s, e = find(src, "^[%a_][%w_]*", pos)
+      ---@cast s integer
       local word = sub(src, assert(s), e)
       state.pos = e + 1
       push({
@@ -448,6 +517,8 @@ end
 --
 -- `-- privata: ignore` is matched against these, so the split has to agree with
 -- the line numbers the lexer assigns: same newline handling, same count.
+---@param src string
+---@return string[]  one entry per line, without its terminator
 function M.source_lines(src)
   local lines = {}
   local count = 0
