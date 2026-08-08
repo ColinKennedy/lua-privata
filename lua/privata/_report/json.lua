@@ -18,6 +18,13 @@ local ESCAPES = {
   ["\t"] = "\\t",
 }
 
+--- Quote a string as a JSON string literal.
+--
+-- Control characters JSON has no short escape for fall through to `\uXXXX`, so
+-- a stray byte in a path or a source line cannot produce a document a consumer
+-- refuses to parse.
+---@param text string
+---@return string  the quoted literal, including its surrounding quotes
 function _P.escape(text)
   local escaped = text:gsub('[%c"\\]', function(character)
     local known = ESCAPES[character]
@@ -29,6 +36,17 @@ function _P.escape(text)
   return '"' .. escaped .. '"'
 end
 
+--- Encode a Lua value as JSON.
+--
+-- Object keys are sorted, so the same findings serialise to the same bytes on
+-- every run and a CI job can diff two reports without `pairs` order making
+-- unrelated files look changed.
+--
+-- Lua cannot tell an empty array from an empty object, and this picks array:
+-- every table privata emits under a plural key is a list, and a consumer
+-- iterating `symbols` should not have to special-case `{}`.
+---@param value any
+---@return string  the JSON text
 function _P.encode(value)
   local kind = type(value)
   if kind == "string" then
@@ -67,10 +85,22 @@ function _P.encode(value)
   return "{" .. table.concat(parts, ",") .. "}"
 end
 
+--- Path relative to the project root, or the path itself when it lies outside.
+--
+-- Relative paths keep a report portable between a developer's checkout and a
+-- CI workspace; falling back to the absolute path keeps a file outside the root
+-- identifiable rather than silently mangled.
+---@param path string
+---@param project_root string
+---@return string
 function _P.relative(path, project_root)
   return fs.relative(path, project_root) or path
 end
 
+--- Shape one symbol finding, with its recommendation when it has one.
+---@param entry privata.Symbol
+---@param project_root string
+---@return table<string, any>  the JSON object for this symbol
 function _P.symbol(entry, project_root)
   local out = {
     file = _P.relative(entry.path, project_root),
@@ -92,6 +122,11 @@ function _P.symbol(entry, project_root)
   return out
 end
 
+--- Map over a list, keeping it a list so `_P.encode` emits a JSON array.
+---@generic T, U
+---@param list T[]
+---@param transform fun(item: T): U
+---@return U[]
 function _P.map(list, transform)
   local out = {}
   for i = 1, #list do
@@ -101,6 +136,10 @@ function _P.map(list, transform)
 end
 
 --- Render findings as a single JSON object.
+---@param findings privata.Findings
+---@param project_root string  paths are emitted relative to this
+---@param config privata.Config  supplies the `downgraded` flags
+---@return string  one JSON object, with sorted keys
 function M.render(findings, project_root, config)
   local document = {
     version = 1,
@@ -131,6 +170,16 @@ function M.render(findings, project_root, config)
         line = entry.line,
         module = entry.module,
         reason = entry.reason,
+      }
+    end),
+    exported_namespaces = _P.map(findings.exported_namespaces, function(entry)
+      return {
+        file = _P.relative(entry.path, project_root),
+        line = entry.line,
+        module = entry.module,
+        namespace = entry.namespace,
+        public_table = entry.public_table,
+        public_fields = entry.public_symbols,
       }
     end),
     symbols = _P.map(findings.symbols, function(entry)

@@ -51,8 +51,8 @@ describe("methods", function()
         return C
       ]],
     }, function(findings)
-      assert.equals(3, findings[1].class_public_methods)
-      assert.equals("C", findings[1].class_name)
+      assert.equal(3, findings[1].class_public_methods)
+      assert.equal("C", findings[1].class_name)
     end)
   end)
 
@@ -147,7 +147,7 @@ describe("methods", function()
       ]],
     }, function(root)
       assert.same({}, privata.check(root).methods)
-      assert.equals(1, #privata.check(root, { methods = true }).methods)
+      assert.equal(1, #privata.check(root, { methods = true }).methods)
     end)
   end)
 end)

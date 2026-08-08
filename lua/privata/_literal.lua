@@ -21,6 +21,9 @@ local _P = {}
 -- Returns the value, or nil plus a reason. Note that a literal `nil` in the
 -- source is indistinguishable from failure in a single return value, which is
 -- why the reason is what callers branch on.
+---@param node any  an expression node; anything else reads as a failure
+---@return any value   the Lua value, or nil when it could not be read
+---@return string|nil reason
 function _P.eval(node)
   if not ast.is_node(node) then
     return nil, "missing value"
@@ -67,6 +70,14 @@ function _P.eval(node)
   return nil, "expression this scan cannot read statically"
 end
 
+--- Convert a table constructor to a Lua table.
+--
+-- One unreadable entry fails the whole table rather than being skipped: a
+-- config half-read is worse than one not read at all, because the caller cannot
+-- tell a setting the user omitted from one privata quietly dropped.
+---@param node privata.Node   a TableExpr node
+---@return table|nil value
+---@return string|nil reason  set only when `value` is nil
 function _P.eval_table(node)
   local out = {}
   local array_index = 0
@@ -98,6 +109,8 @@ end
 -- A rockspec is a sequence of global assignments (`package = "x"`, `build =
 -- {...}`), so the file's meaning is exactly this table. Names whose value is
 -- not literal are omitted; a caller that needed one treats it as absent.
+---@param chunk privata.Node  a Chunk node
+---@return table<string, any>  name to value, for the names that could be read
 function _P.assignments(chunk)
   local out = {}
   for i = 1, #chunk.body do
@@ -119,6 +132,9 @@ function _P.assignments(chunk)
 end
 
 --- Evaluate the table a chunk returns, as `.privata.lua` produces it.
+---@param chunk privata.Node  a Chunk node
+---@return table|nil value
+---@return string|nil reason  set only when `value` is nil
 function _P.returned_table(chunk)
   local last = chunk.body[#chunk.body]
   if last == nil or last.kind ~= "ReturnStatement" then
@@ -134,20 +150,36 @@ function _P.returned_table(chunk)
   return value
 end
 
+--- Describe a parse failure, tolerating a missing reason.
+---@param parse_error { line: integer, message: string }|nil
+---@return string
+function _P.parse_failure(parse_error)
+  if parse_error == nil then
+    return "syntax error"
+  end
+  return string.format("line %d: %s", parse_error.line, parse_error.message)
+end
+
 --- Parse `src` and lift its returned table.
+---@param src string
+---@return table|nil value
+---@return string|nil reason  set only when `value` is nil
 function M.load_returned_table(src)
   local chunk, parse_error = parser.parse(src)
   if not chunk then
-    return nil, string.format("line %d: %s", parse_error.line, parse_error.message)
+    return nil, _P.parse_failure(parse_error)
   end
   return _P.returned_table(chunk)
 end
 
 --- Parse `src` and lift its top-level assignments.
+---@param src string
+---@return table<string, any>|nil values
+---@return string|nil reason  set only when `values` is nil
 function M.load_assignments(src)
   local chunk, parse_error = parser.parse(src)
   if not chunk then
-    return nil, string.format("line %d: %s", parse_error.line, parse_error.message)
+    return nil, _P.parse_failure(parse_error)
   end
   return _P.assignments(chunk)
 end

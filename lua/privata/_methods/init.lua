@@ -29,6 +29,8 @@ local DYNAMIC_LOOKUPS = { rawget = true, rawset = true, setmetatable = true }
 -- unrelated `other.run` elsewhere suppresses a report for `Service.run`. That
 -- over-matches, which only ever costs a missed finding -- the safe direction
 -- for a tool whose output is acted on by rewriting code.
+---@param modules table<string, privata.Module>
+---@return table<string, table<string, boolean>>  name to the set of modules using it
 function _P.referenced_names(modules)
   local names = {}
 
@@ -62,9 +64,14 @@ end
 -- so the reference scan cannot see it. Renaming the base method would strand
 -- the override under its old name, so any table used as a base keeps its
 -- methods public.
+---@param modules table<string, privata.Module>
+---@return table<string, boolean>  set of last-segment table names used as a base
 function _P.base_tables(modules)
   local bases = {}
 
+  -- Only the last segment is kept: a base written `pkg.Base` and one written
+  -- `Base` are the same table to a reader of the subclass.
+  ---@param node privata.Node|nil
   local function note(node)
     local name = ast.dotted_name(node)
     if name then
@@ -121,6 +128,9 @@ end
 --
 -- `C[key]` may reach any method the class has, so renaming one would break a
 -- call the scan never saw. None of the class's methods are checked.
+---@param chunk privata.Node       a Chunk node
+---@param class_name string        the class table's local name
+---@return boolean
 function _P.uses_dynamic_lookup(chunk, class_name)
   local dynamic = false
 
@@ -148,10 +158,19 @@ function _P.uses_dynamic_lookup(chunk, class_name)
 end
 
 --- Methods defined on `class_name`, in source order.
+--
+-- Both spellings count: `function C.m()` and `C.m = function()`. The `:` form
+-- reaches here too, because the parser lowers it to the same index chain.
+---@param chunk privata.Node   a Chunk node
+---@param class_name string
+---@return { name: string, line: integer }[]
 function _P.class_methods(chunk, class_name)
   local found = {}
   local order = {}
 
+  -- First definition wins, so a method reassigned later is reported once.
+  ---@param name string|nil
+  ---@param line integer
   local function record(name, line)
     if name == nil or found[name] then
       return
@@ -191,6 +210,10 @@ end
 --- True when a method forwards to a same-named method on a base.
 --
 -- Cooperative overrides have to keep the name they override.
+---@param chunk privata.Node   a Chunk node
+---@param class_name string
+---@param method_name string
+---@return boolean
 function _P.forwards_to_base(chunk, class_name, method_name)
   local forwards = false
   ast.walk(chunk, function(node)
@@ -205,6 +228,10 @@ function _P.forwards_to_base(chunk, class_name, method_name)
 end
 
 --- Public methods that no other production module refers to.
+---@param modules table<string, privata.Module>
+---@param cross_references table<string, boolean>     set keyed `"module\0name"`
+---@param external_interface table<string, boolean>   the same, for host-reachable names
+---@return privata.Method[]  sorted by location
 function M.collect(modules, cross_references, external_interface)
   local references = _P.referenced_names(modules)
   local bases = _P.base_tables(modules)
@@ -213,7 +240,9 @@ function M.collect(modules, cross_references, external_interface)
   for module_name, record in pairs(modules) do
     local detected = record.shape
     if record.chunk and detected and detected.kind == shape.KINDS.CLASS then
+      -- A CLASS shape always names the table it returns.
       local class_name = detected.public_name
+      ---@cast class_name string
       local qualifies = not bases[class_name]
         and not _P.uses_dynamic_lookup(record.chunk, class_name)
 

@@ -18,6 +18,11 @@ _P.ISSUES = {
 }
 
 --- Names bound as locals at the chunk's top level.
+--
+-- Only the top level, because that is the scope a returned table can name: a
+-- local declared inside a function is not something `return { a = a }` can see.
+---@param chunk privata.Node  a Chunk node
+---@return table<string, integer>  local name to the line declaring it
 function _P.chunk_local_names(chunk)
   local names = {}
   for i = 1, #chunk.body do
@@ -37,13 +42,19 @@ end
 --
 -- Only a re-export list is validated. A literal holding data is not making a
 -- claim about bindings, so there is nothing for it to be wrong about.
+---@param record privata.Module  needs `chunk` and `shape` filled in
+---@return privata.ExportIssueFinding[]  empty unless the file re-exports
 function _P.check_module(record)
   local detected = record.shape
+  -- `M.collect` only calls this for records that have both.
+  ---@cast detected privata.Shape
+  local chunk = record.chunk
+  ---@cast chunk privata.Node
   if detected.kind ~= shape.KINDS.LITERAL or not detected.is_reexport_table then
     return {}
   end
 
-  local locals = _P.chunk_local_names(record.chunk)
+  local locals = _P.chunk_local_names(chunk)
   local issues = {}
 
   for i = 1, #detected.literal.fields do
@@ -51,24 +62,22 @@ function _P.check_module(record)
     local name = field.key.value
     local bound = field.value.name
 
+    local kind = nil
     if locals[bound] == nil then
       -- Lua exports nil for an unbound name rather than raising, so this is a
       -- broken interface that no test necessarily catches.
-      issues[#issues + 1] = {
-        module = record.name,
-        path = record.path,
-        name = name,
-        binding = bound,
-        kind = _P.ISSUES.UNKNOWN,
-        line = field.line,
-      }
+      kind = _P.ISSUES.UNKNOWN
     elseif models.is_private_name(name) then
+      kind = _P.ISSUES.PRIVATE
+    end
+
+    if kind ~= nil and not record.ignored_lines[field.line] then
       issues[#issues + 1] = {
         module = record.name,
         path = record.path,
         name = name,
         binding = bound,
-        kind = _P.ISSUES.PRIVATE,
+        kind = kind,
         line = field.line,
       }
     end
@@ -78,6 +87,8 @@ function _P.check_module(record)
 end
 
 --- Export-table issues across every module.
+---@param modules table<string, privata.Module>
+---@return privata.ExportIssueFinding[]  sorted by location
 function M.collect(modules)
   local issues = {}
   for _, record in pairs(modules) do

@@ -60,7 +60,16 @@ describe("lexer", function()
 
   describe("numbers", function()
     it("reads decimals, floats and exponents", function()
-      assert.same({ "number:1", "number:1.5", "number:1000" }, types_and_values("1 1.5 1e3"))
+      assert.same({ "number:1", "number:1.5" }, types_and_values("1 1.5"))
+
+      -- Asserted as a value rather than as text, because Lua 5.3 gave numbers an
+      -- integer subtype: `1e3` is a float there and prints as "1000.0", while
+      -- 5.1, 5.2 and LuaJIT print "1000". Both are the same number, and privata
+      -- never evaluates arithmetic, so pinning the spelling would be testing the
+      -- interpreter rather than the lexer.
+      local exponent = tokens("1e3")[1]
+      assert.equal(1000, exponent.value)
+      assert.equal("1e3", exponent.raw)
     end)
 
     it("reads a leading-dot float", function()
@@ -75,13 +84,13 @@ describe("lexer", function()
       -- Lua 5.1's tonumber has no hex-float support, and privata never
       -- evaluates arithmetic, so `raw` is the field that has to survive.
       local token = tokens("0x1p4")[1]
-      assert.equals("0x1p4", token.raw)
+      assert.equal("0x1p4", token.raw)
     end)
 
     it("reads LuaJIT integer and imaginary suffixes", function()
       local list = tokens("1LL 2ULL 3i")
       assert.same({ "1LL", "2ULL", "3i" }, { list[1].raw, list[2].raw, list[3].raw })
-      assert.equals(1, list[1].value)
+      assert.equal(1, list[1].value)
     end)
 
     it("rejects a numeral running into a name", function()
@@ -96,25 +105,25 @@ describe("lexer", function()
     end)
 
     it("decodes simple escapes", function()
-      assert.equals("a\tb\nc", tokens([["a\tb\nc"]])[1].value)
+      assert.equal("a\tb\nc", tokens([["a\tb\nc"]])[1].value)
     end)
 
     it("decodes decimal, hex and unicode escapes", function()
-      assert.equals("A", tokens([["\65"]])[1].value)
-      assert.equals("A", tokens([["\x41"]])[1].value)
-      assert.equals("\226\130\172", tokens([["\u{20AC}"]])[1].value)
+      assert.equal("A", tokens([["\65"]])[1].value)
+      assert.equal("A", tokens([["\x41"]])[1].value)
+      assert.equal("\226\130\172", tokens([["\u{20AC}"]])[1].value)
     end)
 
     it("skips whitespace after \\z", function()
-      assert.equals("ab", tokens('"a\\z   \n   b"')[1].value)
+      assert.equal("ab", tokens('"a\\z   \n   b"')[1].value)
     end)
 
     it("reads long strings at any bracket level", function()
-      assert.equals("a]]b", tokens("[==[a]]b]==]")[1].value)
+      assert.equal("a]]b", tokens("[==[a]]b]==]")[1].value)
     end)
 
     it("drops a newline immediately after a long opener", function()
-      assert.equals("body", tokens("[[\nbody]]")[1].value)
+      assert.equal("body", tokens("[[\nbody]]")[1].value)
     end)
 
     it("rejects an unterminated string", function()
@@ -155,17 +164,17 @@ describe("lexer", function()
 
     it("counts lines inside long strings", function()
       local list = tokens("[[\n\n]] x")
-      assert.equals(3, list[2].line)
+      assert.equal(3, list[2].line)
     end)
 
     it("reports columns from the line start", function()
       local list = tokens("a\n  bb")
-      assert.equals(3, list[2].col)
+      assert.equal(3, list[2].col)
     end)
 
     it("keeps a shebang line from shifting later lines", function()
       local list = tokens("#!/usr/bin/env lua\nx")
-      assert.equals(2, list[1].line)
+      assert.equal(2, list[1].line)
     end)
 
     it("skips a UTF-8 byte order mark", function()
@@ -187,7 +196,7 @@ describe("lexer", function()
       local lines = lexer.source_lines(src)
       local list = tokens(src)
       local last = list[#list]
-      assert.equals(3, last.line)
+      assert.equal(3, last.line)
       assert.matches("privata: ignore", lines[2])
     end)
   end)

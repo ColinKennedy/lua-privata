@@ -15,8 +15,8 @@ describe("config", function()
       -- Demoting to a local is not always legal, so the strategy that always
       -- applies has to lead or the first recommendation may be unfollowable.
       local defaults = config._P.defaults()
-      assert.equals("namespace", defaults.privatize[1])
-      assert.equals("_P", defaults.namespace)
+      assert.equal("namespace", defaults.privatize[1])
+      assert.equal("_P", defaults.namespace)
     end)
 
     it("ships only the underscore private-module pattern", function()
@@ -38,7 +38,7 @@ describe("config", function()
     it("uses defaults when no file exists", function()
       with_config({ ["lua/pkg/init.lua"] = "return {}" }, nil, function(loaded, err)
         assert.is_nil(err)
-        assert.equals("_P", loaded.namespace)
+        assert.equal("_P", loaded.namespace)
       end)
     end)
 
@@ -49,8 +49,8 @@ describe("config", function()
         },
         nil,
         function(loaded)
-          assert.equals("_private", loaded.namespace)
-          assert.equals(20, loaded.max_locals)
+          assert.equal("_private", loaded.namespace)
+          assert.equal(20, loaded.max_locals)
         end
       )
     end)
@@ -82,7 +82,7 @@ describe("config", function()
         ["lua/pkg/init.lua"] = "return {}",
       }, function(root)
         local loaded = config.load(root .. "/lua/pkg")
-        assert.equals("_up", loaded.namespace)
+        assert.equal("_up", loaded.namespace)
       end)
     end)
 
@@ -113,7 +113,7 @@ describe("config", function()
         { [".privata.lua"] = "return { namespace = '_file' }" },
         { namespace = "_cli" },
         function(loaded)
-          assert.equals("_cli", loaded.namespace)
+          assert.equal("_cli", loaded.namespace)
         end
       )
     end)
@@ -127,7 +127,7 @@ describe("config", function()
         function(loaded)
           assert.same({ "lua" }, loaded.source_roots)
           assert.same({ "vim" }, loaded.globals)
-          assert.equals("_mine", loaded.namespace)
+          assert.equal("_mine", loaded.namespace)
         end
       )
     end)

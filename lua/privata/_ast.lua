@@ -56,6 +56,12 @@ M.CHILDREN = {
 --- Kinds that can legally be assigned to.
 M.ASSIGNABLE = { Identifier = true, Index = true }
 
+--- True when `value` is an AST node rather than a plain table or a scalar.
+--
+-- A node is recognised by carrying a string `kind`, which is what lets the
+-- walker tell a child node from an array of them without a per-kind table.
+---@param value any
+---@return boolean
 function M.is_node(value)
   return type(value) == "table" and type(value.kind) == "string"
 end
@@ -65,6 +71,8 @@ end
 -- `visit` may return `false` to stop the walk descending into that node's
 -- children; any other return value continues. This is what lets a caller skip
 -- a nested function scope without filtering the whole tree afterwards.
+---@param node any               an AST node; anything else ends the walk
+---@param visit fun(node: privata.Node): boolean|nil
 function M.walk(node, visit)
   if not M.is_node(node) then
     return
@@ -100,6 +108,8 @@ end
 -- function() ... end` binds a function, and a caller deciding what kind of
 -- thing was bound has to see the node to know that. When `node` is itself a
 -- `FunctionExpr` it is the scope under inspection, so its body is walked.
+---@param node any
+---@param visit fun(node: privata.Node): boolean|nil
 function M.walk_shallow(node, visit)
   local seen_root = false
   M.walk(node, function(current)
@@ -117,6 +127,8 @@ end
 -- `a.b.c` resolves; `a[k].c` does not, because the name privata would report
 -- is not the name the code uses. Returning nil is the safe direction: a caller
 -- that cannot read a path declines to report it.
+---@param node any
+---@return string|nil  the dotted path, or nil when any segment is computed
 function M.dotted_name(node)
   if not M.is_node(node) then
     return nil

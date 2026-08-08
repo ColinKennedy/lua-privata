@@ -7,6 +7,78 @@
 local M = {}
 local _P = {}
 
+--- One AST node, as `_parser` builds them.
+--
+-- Declared as the union of every kind's fields rather than one class per kind:
+-- `kind` is what the code branches on, and a per-kind hierarchy would mean a
+-- cast at every branch without making any of them safer. The comment on each
+-- field names the kinds that carry it.
+---@class privata.Node
+-- Only `kind` and `line` are on every node; the rest are declared optional and
+-- the comment names the kinds that carry them. Optional here means "absent on
+-- other kinds", not "may be missing on its own" -- every reader narrows on
+-- `kind` first, and the two fields that really can be absent say so.
+---@class privata.Node
+---@field kind string          which node this is; see `_ast.CHILDREN`
+---@field line integer         where the construct starts
+---@field body? privata.Node[]          Chunk, Do, While, Repeat, IfClause, For, FunctionExpr
+---@field cond? privata.Node            While, Repeat, IfClause
+---@field clauses? privata.Node[]       IfStatement
+---@field else_body? privata.Node[]     IfStatement; absent without an `else`
+---@field names? privata.Identifier[]   LocalDeclaration, GenericFor
+---@field attribs? (string|false)[]     LocalDeclaration; 5.4 `<const>` / `<close>`
+---@field values? privata.Node[]        LocalDeclaration, Assignment, Return
+---@field targets? privata.Node[]       Assignment
+---@field target? privata.Node          FunctionDeclaration
+---@field func? privata.Node            LocalFunction, FunctionDeclaration
+---@field name? privata.Identifier|string  a node on LocalFunction, a string on Identifier and Label
+---@field label? string                 GotoStatement
+---@field var? privata.Identifier       NumericFor
+---@field start? privata.Node           NumericFor
+---@field limit? privata.Node           NumericFor
+---@field step? privata.Node            NumericFor; absent when the loop declares none
+---@field exprs? privata.Node[]         GenericFor
+---@field expr? privata.Node            CallStatement, Paren
+---@field params? privata.Identifier[]  FunctionExpr
+---@field is_vararg? boolean            FunctionExpr
+---@field is_method? boolean            FunctionExpr, FunctionDeclaration
+---@field end_line? integer             FunctionExpr; line of its `end`
+---@field fields? privata.Node[]        TableExpr
+---@field key? privata.Node             TableField; absent for a positional entry
+---@field value? any                    String, Number and TableField all carry one
+---@field raw? string                   String, Number; the source text
+---@field long? boolean                 String; absent on one the parser synthesised
+---@field synthetic? boolean            String the parser made from a field name
+---@field op? string                    BinaryOp, UnaryOp
+---@field left? privata.Node            BinaryOp
+---@field right? privata.Node           BinaryOp
+---@field operand? privata.Node         UnaryOp
+---@field object? privata.Node          Index, MethodCall
+---@field index? privata.Node           Index; the key expression
+---@field computed? boolean             Index, TableField; true for `a[k]`
+---@field field_line? integer           Index; absent on a computed `a[k]`
+---@field callee? privata.Node          Call
+---@field args? privata.Node[]          Call, MethodCall
+---@field method? string                MethodCall
+---@field method_line? integer          MethodCall
+
+--- An `Identifier` node, narrowed so its `name` is known to be a string.
+--
+-- Worth its own class because the parser puts a *node* under `name` on a
+-- `LocalFunction` and a *string* there on an `Identifier`, and the fields that
+-- only ever hold identifiers -- parameters, loop variables, declared names --
+-- are read for their string constantly.
+---@class privata.Identifier : privata.Node
+---@field name string
+---@field col? integer       absent on the implicit `self`, which has no source text
+---@field implicit? boolean  the `self` a method declaration never wrote
+---@field vararg? boolean    the `...` parameter
+
+--- A file location, as the report prints it.
+---@class privata.Location
+---@field path string
+---@field line integer
+
 ---@class privata.Symbol
 ---@field name string          field name as written, e.g. "helper"
 ---@field path_name string     full path on its table, e.g. "M.helper"
@@ -16,6 +88,11 @@ local _P = {}
 ---@field module string
 ---@field path string
 ---@field uses integer[]       lines inside the defining module that read it
+---@field end_line integer     last line of a function value, for recursion checks
+---@field recommendation privata.Recommendation|nil  filled in by `_recommend` when reported
+---@field test_read privata.Location|nil       where a spec reads it, if one does
+---@field test_stub privata.Location|nil       where a spec replaces it, if one does
+---@field string_mention privata.Location|nil  where its name appears in a string literal
 
 ---@class privata.Method
 ---@field name string
@@ -31,16 +108,156 @@ local _P = {}
 ---@field path string
 ---@field source_root string
 ---@field package_parts string[]
----@field chunk table|nil      retained AST; every later stage walks this
----@field shape table|nil      what `_shape` made of the file
+---@field chunk privata.Node|nil  retained AST; every later stage walks this
+---@field shape privata.Shape|nil what `_shape` made of the file
+---@field scope privata.ScopeReport|nil  what `_scope` made of its name bindings
 ---@field symbols privata.Symbol[]
 ---@field private_symbols privata.Symbol[]
 ---@field ignored_lines table<integer, boolean>
 ---@field exports table<string, boolean>
+---@field is_test_helper boolean|nil  true for a helper co-located with the specs
 
 ---@class privata.Finding
 ---@field path string
 ---@field line integer
+---@field name string|nil  present on most kinds; the last tiebreak when sorting
+
+--- How privata suggests a symbol be made private.
+---@class privata.Recommendation
+---@field strategy string        "namespace", "local_function" or "underscore_field"
+---@field text string            the one-line instruction printed in the report
+---@field notes string[]         caveats: a forward declaration needed, a spec to update
+---@field namespace string|nil   the table to move into, on a namespace recommendation
+
+--- What `_shape` made of a file. Exactly one of `kind` and `reason` is set.
+---@class privata.Shape
+---@field kind string|nil        one of `_shape.KINDS` when the file could be read
+---@field reason string|nil      one of `models.UNANALYZABLE` when it could not
+---@field line integer|nil       where to point when reporting a `reason`
+---@field public_name string|nil the local name of the returned table
+---@field public_line integer|nil where that local is declared
+---@field return_line integer|nil where the file returns it
+---@field private_name string|nil the private namespace, when the file declares one
+---@field table_locals table<string, { name: string, line: integer }>|nil
+---@field literal privata.Node|nil        the returned TableExpr, on a LITERAL shape
+---@field is_reexport_table boolean|nil   whether that literal is `{ a = a }`
+
+--- A file scanned only for the references it makes, never for symbols.
+---@class privata.Consumer
+---@field name string             dotted name, or `"\0script:<path>"` for a bin script
+---@field path string
+---@field chunk privata.Node      retained AST
+---@field package_parts string[]
+---@field source_root string|nil  the test root it was found under, where there is one
+---@field is_test_file boolean|nil true when its filename marks it a spec
+
+--- The effective configuration for one scan.
+--
+-- Layered defaults < preset < `.privata.lua` < command line, each layer
+-- replacing a key outright. See `_config.defaults` for the values.
+---@class privata.Config
+---@field preset string|nil                name of the applied preset
+---@field source_roots string[]|nil        nil means "discover them"
+---@field test_roots string[]
+---@field exclude string[]                 paths relative to the project root
+---@field privatize string[]               strategies in the order they are tried
+---@field namespace string                 the private table to recommend
+---@field local_function_style string      "statement" or "assignment"
+---@field local_function_forward_decl boolean  may a recommendation add a forward local
+---@field max_locals integer               ceiling below Lua's own 200-local limit
+---@field private_module_patterns string[] patterns marking a module segment private
+---@field package_private string[]         prefixes inside which siblings may reach in
+---@field fail_on string[]                 finding kinds that make the run exit non-zero
+---@field globals string[]                 global names the project allows
+---@field entrypoint_globs string[]
+---@field entrypoint_names string[]        symbol names a host calls, e.g. "setup"
+---@field entrypoint_modules string[]      module name patterns kept public wholesale
+---@field methods boolean                  the `--methods` spelling of `checks.methods`
+---@field skip_unparsable_files boolean
+---@field skip_module_collisions boolean
+---@field format string                    "text" or "json"
+---@field checks table<string, boolean>    which checks report at all
+
+---@class privata.UnparsableFinding
+---@field module string
+---@field path string
+---@field line integer
+---@field message string
+
+---@class privata.CollisionFinding
+---@field module string        the dotted name two or more files claim
+---@field paths string[]       sorted
+
+---@class privata.UnanalyzableFinding
+---@field module string
+---@field path string
+---@field line integer
+---@field reason string        one of `models.UNANALYZABLE`
+
+---@class privata.GlobalFinding
+---@field name string
+---@field kind string          one of `M.KINDS`
+---@field explicit boolean     written as `_G.name`, rather than a missing `local`
+---@field module string
+---@field path string
+---@field line integer
+
+--- A module that returns the very table the config calls private.
+---@class privata.ExportedNamespaceFinding
+---@field module string
+---@field path string
+---@field line integer
+---@field namespace string
+---@field name string                      the same as `namespace`, for sorting
+---@field public_table string|nil          a non-private table the file also declares
+---@field public_symbols integer           how many fields this publishes
+---@field consumed boolean                 whether production code reads the return
+---@field advisory boolean                 true when no fix would improve the file
+---@field test_handle privata.Location|nil where a spec holds the table
+
+---@class privata.PrivateModuleRequireFinding
+---@field module string             the private module being required
+---@field path string               where that module lives
+---@field required_by string
+---@field required_by_path string
+---@field line integer              the `require` line, in the requiring file
+---@field name string               the same as `module`, for sorting
+
+---@class privata.PrivateSymbolReadFinding
+---@field module string             the module owning the private name
+---@field name string
+---@field path string               where that name is defined
+---@field read_by string
+---@field read_by_path string
+---@field line integer              the read line, in the reading file
+
+---@class privata.ExportIssueFinding
+---@field module string
+---@field path string
+---@field name string               the name in the returned table
+---@field binding string            the local it names
+---@field kind string               "unknown", "private" or "missing"
+---@field line integer
+
+--- Everything one scan found, in the order the report prints it.
+---@class privata.Findings
+---@field roots string[]                                the source roots scanned
+---@field unparsable privata.UnparsableFinding[]
+---@field collisions privata.CollisionFinding[]
+---@field unanalyzable privata.UnanalyzableFinding[]
+---@field exported_namespaces privata.ExportedNamespaceFinding[]
+---@field symbols privata.Symbol[]
+---@field globals privata.GlobalFinding[]
+---@field private_module_requires privata.PrivateModuleRequireFinding[]
+---@field private_symbol_reads privata.PrivateSymbolReadFinding[]
+---@field export_issues privata.ExportIssueFinding[]
+---@field methods privata.Method[]
+
+--- The private namespace privata recommends when a config does not say
+--- otherwise. Defined here so `_config` and `_shape` cannot drift apart: one
+--- of them deciding the default is `_P` while the other assumes nothing would
+--- mean a file's own `_P` went unrecognised.
+M.DEFAULT_NAMESPACE = "_P"
 
 --- What a public name is bound to. Only used for wording a report; no check
 --- branches on it, because a table and a function leak an interface alike.
@@ -63,7 +280,6 @@ M.UNANALYZABLE = {
   MULTIPLE_RETURNS = "returns more than one value",
   CONDITIONAL_RETURN = "returns from more than one place",
   COMPUTED_RETURN = "returns a table this scan cannot read statically",
-  NO_RETURN = "returns nothing, so it exports nothing to read",
   LEGACY_MODULE = "uses the 5.1 module() function",
 }
 
@@ -84,6 +300,8 @@ _P.CONVENTIONAL_PUBLIC_NAMES = {
 --
 -- A single leading underscore is the convention; a double underscore is a
 -- metamethod, which is neither private nor a name anyone chose.
+---@param name string
+---@return boolean
 function M.is_private_name(name)
   if _P.CONVENTIONAL_PUBLIC_NAMES[name] then
     return false
@@ -91,12 +309,21 @@ function M.is_private_name(name)
   return name:sub(1, 1) == "_" and name:sub(1, 2) ~= "__"
 end
 
+--- True for a `__`-led name, which Lua reserves for metamethods.
+--
+-- Separate from `is_private_name` because a metamethod is not a privacy
+-- decision anyone made: it is the name the language requires.
+---@param name string
+---@return boolean
 function M.is_metamethod(name)
   return name:sub(1, 2) == "__"
 end
 
 --- Order findings by file then position, so output is stable across runs and
 --- across filesystems that hand back directory entries in different orders.
+---@param a privata.Finding
+---@param b privata.Finding
+---@return boolean
 function _P.by_location(a, b)
   if a.path ~= b.path then
     return a.path < b.path
@@ -107,12 +334,19 @@ function _P.by_location(a, b)
   return tostring(a.name) < tostring(b.name)
 end
 
+--- Sort a finding list in place by location, and hand it back for chaining.
+---@param findings privata.Finding[]
+---@return privata.Finding[]  the same list, sorted
 function M.sort_findings(findings)
   table.sort(findings, _P.by_location)
   return findings
 end
 
 --- Pluralise a count for report text: `M.count(1, "symbol")` -> "1 symbol".
+---@param number integer
+---@param singular string
+---@param plural string|nil  irregular plural; defaults to `singular .. "s"`
+---@return string
 function M.count(number, singular, plural)
   if number == 1 then
     return "1 " .. singular

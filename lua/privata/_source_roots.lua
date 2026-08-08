@@ -40,6 +40,12 @@ _P.DEFAULT_TEST_ROOTS = { "spec", "test", "tests" }
 --- Roots tried in order when the config names none.
 _P.DEFAULT_SOURCE_ROOTS = { "lua", "src" }
 
+--- True for a filename that busted or luaunit would pick up as a test.
+--
+-- Matched on the filename alone, so a spec sitting outside any test root is
+-- still recognised as one.
+---@param name string  basename, not a path
+---@return boolean
 function M.is_test_filename(name)
   for i = 1, #_P.TEST_FILE_PATTERNS do
     if name:find(_P.TEST_FILE_PATTERNS[i]) then
@@ -53,6 +59,8 @@ end
 --
 -- Hidden directories are skipped wholesale: they hold tooling, not modules,
 -- and a scan that walked `.git` would be slower than the check it performs.
+---@param name string  a single directory name, not a path
+---@return boolean
 function _P.is_ignored_directory(name)
   if _P.IGNORED_DIRECTORIES[name] then
     return true
@@ -65,6 +73,9 @@ end
 -- `lua/foo/bar.lua` is `foo.bar`; `lua/foo/init.lua` is `foo`, because
 -- `package.path` ships `?/init.lua` and that is the `__init__.py` analogue.
 -- Returns nil for a root-level `init.lua`, which names no module.
+---@param path string
+---@param root string
+---@return string|nil  dotted module name, or nil when the path names none
 function M.module_name(path, root)
   local relative = fs.relative(path, root)
   if relative == nil or relative == "." then
@@ -91,6 +102,8 @@ function M.module_name(path, root)
 end
 
 --- The package path used to resolve a relative reference from this module.
+---@param module_name string  dotted module name
+---@return string[]           the segments above it; empty for a top-level module
 function M.package_parts(module_name)
   local parts = {}
   for segment in module_name:gmatch("[^.]+") do
@@ -100,6 +113,14 @@ function M.package_parts(module_name)
   return parts
 end
 
+--- Resolve `names` against the project root, keeping only those that exist.
+--
+-- A configured root that is not there is dropped rather than reported, which is
+-- what lets one config serve several checkouts: naming both `lua` and `src` is
+-- a statement about where sources may live, not a claim that both do.
+---@param project_root string
+---@param names string[]     directory names relative to the project root
+---@return string[]          normalized absolute paths, in the given order
 function _P.existing_directories(project_root, names)
   local roots = {}
   for i = 1, #names do
@@ -123,6 +144,10 @@ end
 --
 -- Returns the roots and a label saying which rule produced them, so the CLI
 -- can tell a user why privata scanned where it did.
+---@param project_root string
+---@param config table|nil
+---@return string[] roots
+---@return string source  which rule won: "config", "rockspec", "convention", "project root"
 function M.discover(project_root, config)
   project_root = fs.normalize(project_root)
 
@@ -147,6 +172,9 @@ function M.discover(project_root, config)
 end
 
 --- Resolve the test roots, which are scanned only as consumers.
+---@param project_root string
+---@param config table|nil
+---@return string[]
 function M.discover_test_roots(project_root, config)
   local names = (config and config.test_roots) or _P.DEFAULT_TEST_ROOTS
   return _P.existing_directories(project_root, names)
@@ -157,6 +185,7 @@ end
 -- Configured exclusions are applied afterwards, against the project root, not
 -- here: a scan can have several source roots, so a rule resolved relative to
 -- whichever root happened to be current would mean different things per root.
+---@return fun(name: string): boolean
 function M.production_skip()
   return function(name)
     return _P.is_ignored_directory(name)
@@ -164,6 +193,7 @@ function M.production_skip()
 end
 
 --- The directory filter for a test root, where test directories are the point.
+---@return fun(name: string): boolean
 function M.test_skip()
   return function(name)
     if _P.IGNORED_DIRECTORIES[name] and not _P.is_test_directory_name(name) then
@@ -173,6 +203,13 @@ function M.test_skip()
   end
 end
 
+--- True for a directory name that conventionally holds tests.
+--
+-- Kept separate from the configured test roots: this answers "would anyone call
+-- this a test directory", which is what lets `test_skip` readmit the very names
+-- `_P.IGNORED_DIRECTORIES` excludes from a production scan.
+---@param name string
+---@return boolean
 function _P.is_test_directory_name(name)
   for i = 1, #_P.DEFAULT_TEST_ROOTS do
     if _P.DEFAULT_TEST_ROOTS[i] == name then

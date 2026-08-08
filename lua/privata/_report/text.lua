@@ -14,11 +14,18 @@ local _P = {}
 local INDENT = "      "
 local WIDTH = 94
 
+--- Path relative to the project root, or the path itself when it lies outside.
+---@param path string
+---@param project_root string
+---@return string
 function _P.relative(path, project_root)
   return fs.relative(path, project_root) or path
 end
 
 --- Wrap a comma-joined list so the indented detail lines stay readable.
+---@param items string[]
+---@param width integer  the budget for one line, excluding its indent
+---@return string[]  one entry per output line; empty when `items` is
 function _P.wrap(items, width)
   local lines = {}
   local current = ""
@@ -39,6 +46,9 @@ function _P.wrap(items, width)
   return lines
 end
 
+--- Start a section, separated from whatever came before it.
+---@param out string[]  appended to in place
+---@param heading string
 function _P.section(out, heading)
   if #out > 0 then
     out[#out + 1] = ""
@@ -47,6 +57,14 @@ function _P.section(out, heading)
   out[#out + 1] = ""
 end
 
+--- Report files that could not be parsed.
+--
+-- Worded as an error or a warning depending on the config, because a skipped
+-- file still stops contributing references either way.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.UnparsableFinding[]
+---@param project_root string  paths are printed relative to this
+---@param config privata.Config
 function _P.unparsable(out, findings, project_root, config)
   local verb = config.skip_unparsable_files and "warning" or "error"
   _P.section(
@@ -65,6 +83,11 @@ function _P.unparsable(out, findings, project_root, config)
   end
 end
 
+--- Report module names claimed by more than one file.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.CollisionFinding[]
+---@param project_root string  paths are printed relative to this
+---@param config privata.Config
 function _P.collisions(out, findings, project_root, config)
   local verb = config.skip_module_collisions and "warning" or "error"
   _P.section(
@@ -87,6 +110,10 @@ function _P.collisions(out, findings, project_root, config)
   end
 end
 
+--- Report files whose module shape privata declined to guess at.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.UnanalyzableFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.unanalyzable(out, findings, project_root)
   _P.section(
     out,
@@ -102,11 +129,122 @@ function _P.unanalyzable(out, findings, project_root)
   end
 end
 
+--- Report a module that returns the table the config calls private.
+--
+-- Printed above the symbol list, and the offending file contributes nothing to
+-- that list, so this is the first and only thing said about it. Everything else
+-- privata could say about the file follows from this being fixed first, and the
+-- remedy is spelled out rather than implied: a reader -- or a tool acting on the
+-- report -- should not have to infer what to rename it to.
+--
+-- Split into two groups so an advisory finding never leads: it is a clean bill
+-- of health, and printing it alongside the blocking ones reads as a queue.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.ExportedNamespaceFinding[]
+---@param project_root string  paths are printed relative to this
+function _P.exported_namespaces(out, findings, project_root)
+  local blocking, advisory = {}, {}
+  for i = 1, #findings do
+    local bucket = findings[i].advisory and advisory or blocking
+    bucket[#bucket + 1] = findings[i]
+  end
+
+  if #blocking > 0 then
+    _P.exported_namespace_group(out, blocking, project_root, true)
+  end
+  if #advisory > 0 then
+    _P.exported_namespace_group(out, advisory, project_root, false)
+  end
+end
+
+--- Print one group of exported-namespace findings, with its own heading.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.ExportedNamespaceFinding[]  all of one severity
+---@param project_root string  paths are printed relative to this
+---@param blocking boolean  false for the advisory group, which never fails a run
+function _P.exported_namespace_group(out, findings, project_root, blocking)
+  _P.section(
+    out,
+    blocking
+        and string.format(
+          "Found %s exporting the namespace configured as private; "
+            .. "fix this before anything else in the file:",
+          models.count(#findings, "module")
+        )
+      or string.format(
+        "Found %s returning the private namespace as a test handle "
+          .. "(nothing in production reads it; advisory, never blocks):",
+        models.count(#findings, "module")
+      )
+  )
+  for i = 1, #findings do
+    local entry = findings[i]
+    local surface = entry.public_symbols == 1 and "its 1 field is public"
+      or string.format("all %d fields on it are public", entry.public_symbols)
+    out[#out + 1] = string.format(
+      "  %s:%d: returns `%s`, so %s",
+      _P.relative(entry.path, project_root),
+      entry.line,
+      entry.namespace,
+      surface
+    )
+
+    if not entry.consumed and entry.test_handle then
+      -- A test holds the table and production does not, so both of the obvious
+      -- remedies are wrong: returning nothing breaks the spec, and renaming to
+      -- `M` publishes every field. Naming the seam publishes exactly one, which
+      -- is narrower than either -- and it is the idiom, not an invention.
+      out[#out + 1] = INDENT
+        .. string.format(
+          "held by %s:%d, and no production module reads it",
+          _P.relative(entry.test_handle.path, project_root),
+          entry.test_handle.line
+        )
+      out[#out + 1] = INDENT
+        .. string.format(
+          "if that is deliberate, say so: `local M = {}; M.%s = %s; return M`",
+          entry.namespace,
+          entry.namespace
+        )
+    elseif not entry.consumed then
+      -- Nothing reads this return value at all. Here "return nothing" really is
+      -- available, and it is the narrowest thing the file can do.
+      out[#out + 1] = INDENT .. "no production module reads this return value"
+      out[#out + 1] = INDENT .. "return nothing, or rename to `M` if you intend a public interface"
+    elseif entry.public_table then
+      out[#out + 1] = INDENT
+        .. string.format(
+          "merge `%s` into `%s` and return `%s`; keep `%s` for what stays private",
+          entry.namespace,
+          entry.public_table,
+          entry.public_table,
+          entry.namespace
+        )
+    else
+      out[#out + 1] = INDENT
+        .. string.format(
+          "rename the returned table to `M`; keep `%s` for what stays private",
+          entry.namespace
+        )
+    end
+  end
+end
+
+--- Report public symbols nothing outside their module reads.
+--
+-- Each line carries the recommendation, the lines that read the symbol, and any
+-- caveat -- everything needed to act on it without opening the file.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.Symbol[]
+---@param project_root string  paths are printed relative to this
 function _P.symbols(out, findings, project_root)
   _P.section(
     out,
     string.format("Found %s that could be made private:", models.count(#findings, "public symbol"))
   )
+  -- The namespace-declaration hint is per file, not per symbol. Printed once
+  -- per finding it accounted for eighty-odd identical lines on a real repo.
+  local hinted = {}
   for i = 1, #findings do
     local symbol = findings[i]
     local recommendation = symbol.recommendation
@@ -137,12 +275,36 @@ function _P.symbols(out, findings, project_root)
 
     if recommendation then
       for index = 1, #recommendation.notes do
-        out[#out + 1] = INDENT .. recommendation.notes[index]
+        local note = recommendation.notes[index]
+        local declaration = note:match("^add `local .* = {}`")
+        if declaration == nil then
+          out[#out + 1] = INDENT .. note
+        elseif not hinted[symbol.path] then
+          hinted[symbol.path] = true
+          out[#out + 1] = INDENT .. note
+        end
       end
+    end
+
+    -- Annotated, never suppressed. A name reached through a dispatch table,
+    -- `_G[name]` or `vim.fn[name]` appears only as a bare string, and privata
+    -- cannot tell that from a coincidence -- so it reports what it saw rather
+    -- than silently recommending a rename that breaks at runtime.
+    if symbol.string_mention then
+      out[#out + 1] = INDENT
+        .. string.format(
+          "name also appears in a string at %s:%d -- check it is not reached by name",
+          _P.relative(symbol.string_mention.path, project_root),
+          symbol.string_mention.line
+        )
     end
   end
 end
 
+--- Report global bindings.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.GlobalFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.globals(out, findings, project_root)
   _P.section(
     out,
@@ -154,15 +316,23 @@ function _P.globals(out, findings, project_root)
   for i = 1, #findings do
     local entry = findings[i]
     out[#out + 1] = string.format(
-      "  %s:%d: %s `%s`",
+      "  %s:%d: %s `%s`%s",
       _P.relative(entry.path, project_root),
       entry.line,
       entry.kind,
-      entry.name
+      entry.name,
+      -- `_G.foo = ...` is a declaration, not a missing `local`. Often it is the
+      -- only way a host that can see nothing else reaches the name, so "should
+      -- be local" would be wrong advice.
+      entry.explicit and " -- declared on `_G`; confirm the host needs it" or ""
     )
   end
 end
 
+--- Report requires of a private module from outside its owning package.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.PrivateModuleRequireFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.private_module_requires(out, findings, project_root)
   _P.section(
     out,
@@ -182,23 +352,70 @@ function _P.private_module_requires(out, findings, project_root)
   end
 end
 
-function _P.private_symbol_reads(out, findings, project_root)
-  _P.section(
-    out,
-    string.format("Found %s from another module:", models.count(#findings, "private symbol read"))
-  )
+--- Group private-symbol reads by the name being read, not by the reader.
+--
+-- One private name read by eight sibling modules is a single design fact, not
+-- eight boundary violations, and printing it eight times buries that. The
+-- fan-out is the interesting number, so it leads.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.PrivateSymbolReadFinding[]
+---@param project_root string  paths are printed relative to this
+---@param config privata.Config|nil  consulted only to mention `package_private`
+function _P.private_symbol_reads(out, findings, project_root, config)
+  local groups = {}
+  local order = {}
   for i = 1, #findings do
     local entry = findings[i]
-    out[#out + 1] = string.format(
-      "  %s:%d: reads private symbol `%s.%s`",
-      _P.relative(entry.read_by_path, project_root),
-      entry.line,
-      entry.module,
-      entry.name
+    local key = entry.module .. "." .. entry.name
+    if groups[key] == nil then
+      groups[key] = {}
+      order[#order + 1] = key
+    end
+    local readers = groups[key]
+    readers[#readers + 1] = entry
+  end
+  table.sort(order)
+
+  -- Both numbers, because they are both true and they are not the same one:
+  -- how many names leak, and how much of the codebase depends on them leaking.
+  _P.section(
+    out,
+    string.format(
+      "Found %s read from another module (%s):",
+      models.count(#order, "private symbol"),
+      models.count(#findings, "read")
     )
+  )
+  if config and #(config.package_private or {}) == 0 then
+    -- The option that resolves this whole section exists and nothing else here
+    -- points at it. A user who has to find it in the README will not.
+    out[#out + 1] = "  (if these are package-internal by design, set `package_private`)"
+    out[#out + 1] = ""
+  end
+
+  for i = 1, #order do
+    local readers = groups[order[i]]
+    out[#out + 1] =
+      string.format("  `%s` -- read by %s", order[i], models.count(#readers, "module"))
+    local marks = {}
+    for index = 1, #readers do
+      marks[index] = string.format(
+        "%s:%d",
+        _P.relative(readers[index].read_by_path, project_root),
+        readers[index].line
+      )
+    end
+    local wrapped = _P.wrap(marks, WIDTH - #INDENT)
+    for index = 1, #wrapped do
+      out[#out + 1] = INDENT .. wrapped[index]
+    end
   end
 end
 
+--- Report stale or private entries in a literal export table.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.ExportIssueFinding[]
+---@param project_root string  paths are printed relative to this
 function _P.export_issues(out, findings, project_root)
   _P.section(out, string.format("Found %s:", models.count(#findings, "export table issue")))
   for i = 1, #findings do
@@ -216,6 +433,10 @@ function _P.export_issues(out, findings, project_root)
   end
 end
 
+--- Report public methods nothing refers to, grouped by the class holding them.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.Method[]
+---@param project_root string  paths are printed relative to this
 function _P.methods(out, findings, project_root)
   local groups = {}
   local order = {}
@@ -264,6 +485,10 @@ function _P.methods(out, findings, project_root)
 end
 
 --- Render findings as text.
+---@param findings privata.Findings
+---@param project_root string  paths are printed relative to this
+---@param config privata.Config
+---@return string  the whole report, or a single clean-run line
 function M.render(findings, project_root, config)
   local out = {}
 
@@ -276,20 +501,26 @@ function M.render(findings, project_root, config)
   if #findings.unanalyzable > 0 then
     _P.unanalyzable(out, findings.unanalyzable, project_root)
   end
+  -- Defects lead. An accidental global is objectively a bug; everything below
+  -- it is a statement about intended surface area, and a reader who has to
+  -- scroll past two hundred opinions to reach three real leaks will not.
+  if #findings.globals > 0 then
+    _P.globals(out, findings.globals, project_root)
+  end
+  if #findings.exported_namespaces > 0 then
+    _P.exported_namespaces(out, findings.exported_namespaces, project_root)
+  end
   if #findings.symbols > 0 then
     _P.symbols(out, findings.symbols, project_root)
   end
   if #findings.methods > 0 then
     _P.methods(out, findings.methods, project_root)
   end
-  if #findings.globals > 0 then
-    _P.globals(out, findings.globals, project_root)
-  end
   if #findings.private_module_requires > 0 then
     _P.private_module_requires(out, findings.private_module_requires, project_root)
   end
   if #findings.private_symbol_reads > 0 then
-    _P.private_symbol_reads(out, findings.private_symbol_reads, project_root)
+    _P.private_symbol_reads(out, findings.private_symbol_reads, project_root, config)
   end
   if #findings.export_issues > 0 then
     _P.export_issues(out, findings.export_issues, project_root)

@@ -16,6 +16,10 @@ local lexer = require("privata._lexer")
 local M = {}
 local _P = {}
 
+---@class privata.ParseState
+---@field tokens privata.Token[]  the whole stream, always ending in an "eof" token
+---@field index integer           1-based position of the token not yet consumed
+
 --- Left and right binding power per binary operator.
 --
 -- Mirrors the table in Lua's own lparser.c. A right power below the left power
@@ -56,6 +60,12 @@ local BLOCK_ENDS = {
   ["until"] = true,
 }
 
+--- Raise a syntax error naming the token it stopped at.
+--
+-- Thrown as a table with level 0, matching `_lexer.fail`, so `M.parse` can tell
+-- a syntax error from a genuine crash and report only the former as a finding.
+---@param token privata.Token
+---@param message string
 function _P.fail(token, message)
   local near = token.value
   if token.type == "eof" then
@@ -68,10 +78,22 @@ function _P.fail(token, message)
   }, 0)
 end
 
+--- The token `offset` places ahead, without consuming it.
+--
+-- With no offset this is always a token: the stream ends in "eof" and the
+-- parser stops there, so the current position is never past the end. A
+-- non-zero offset can run off the end, and the two callers that use one check
+-- for nil themselves.
+---@param state privata.ParseState
+---@param offset integer|nil  defaults to 0, the current token
+---@return privata.Token
 function _P.peek(state, offset)
   return state.tokens[state.index + (offset or 0)]
 end
 
+--- Consume the current token and return it.
+---@param state privata.ParseState
+---@return privata.Token
 function _P.advance(state)
   local token = state.tokens[state.index]
   state.index = state.index + 1
@@ -79,11 +101,20 @@ function _P.advance(state)
 end
 
 --- True when the current token is exactly this operator or keyword.
+---@param state privata.ParseState
+---@param kind string    token type, e.g. "op" or "keyword"
+---@param value any      the exact token value to match
+---@return boolean
 function _P.check(state, kind, value)
   local token = state.tokens[state.index]
   return token.type == kind and token.value == value
 end
 
+--- Consume the current token if it matches, otherwise leave it alone.
+---@param state privata.ParseState
+---@param kind string
+---@param value any
+---@return privata.Token|nil  the consumed token, or nil when it did not match
 function _P.accept(state, kind, value)
   if _P.check(state, kind, value) then
     return _P.advance(state)
@@ -91,6 +122,12 @@ function _P.accept(state, kind, value)
   return nil
 end
 
+--- Consume the current token or fail, naming what went unclosed.
+---@param state privata.ParseState
+---@param kind string
+---@param value any
+---@param what string|nil  construct being closed, for the error message
+---@return privata.Token
 function _P.expect(state, kind, value, what)
   local token = state.tokens[state.index]
   if token.type ~= kind or token.value ~= value then
@@ -99,6 +136,9 @@ function _P.expect(state, kind, value, what)
   return _P.advance(state)
 end
 
+--- Consume an identifier token, or fail.
+---@param state privata.ParseState
+---@return privata.Token
 function _P.expect_name(state)
   local token = state.tokens[state.index]
   if token.type ~= "name" then
@@ -113,6 +153,8 @@ end
 -- `goto` is reserved from Lua 5.2 on but an ordinary name in 5.1 and LuaJIT,
 -- where `goto = 1` and `goto()` are both legal. Only `goto <name>` in statement
 -- position is a jump; anything else is the name.
+---@param state privata.ParseState
+---@return boolean
 function _P.at_goto_statement(state)
   local token = _P.peek(state)
   if token.type ~= "name" or token.value ~= "goto" then
@@ -122,6 +164,12 @@ function _P.at_goto_statement(state)
   return next_token ~= nil and next_token.type == "name"
 end
 
+--- True at a token that closes the enclosing block without belonging to it.
+--
+-- `eof` counts, so an unterminated block is caught by whoever expected the
+-- closing keyword rather than by running off the end of the token list.
+---@param state privata.ParseState
+---@return boolean
 function _P.at_block_end(state)
   local token = _P.peek(state)
   if token.type == "eof" then
@@ -130,6 +178,12 @@ function _P.at_block_end(state)
   return token.type == "keyword" and BLOCK_ENDS[token.value] == true
 end
 
+--- Parse statements until the block's closing keyword.
+--
+-- The closer is left unconsumed for the caller, which is the only one that
+-- knows which keyword is legal there and what to name in the error if it is not.
+---@param state privata.ParseState
+---@return privata.Node[]  statement nodes, in source order
 function _P.parse_block(state)
   local body = {}
   local count = 0
@@ -148,6 +202,9 @@ function _P.parse_block(state)
   return body
 end
 
+--- Parse `return`, which Lua allows only as the last statement in a block.
+---@param state privata.ParseState
+---@return privata.Node  a ReturnStatement node
 function _P.parse_return(state)
   local token = _P.advance(state)
   local values = {}
@@ -158,6 +215,9 @@ function _P.parse_return(state)
   return { kind = "ReturnStatement", values = values, line = token.line }
 end
 
+--- Parse one statement, dispatching on its leading token.
+---@param state privata.ParseState
+---@return privata.Node|nil  the statement node, or nil for a bare `;`, which binds nothing
 function _P.parse_statement(state)
   local token = _P.peek(state)
 
@@ -206,6 +266,9 @@ function _P.parse_statement(state)
   return _P.parse_expression_statement(state)
 end
 
+--- Parse `::name::`.
+---@param state privata.ParseState
+---@return privata.Node  a LabelStatement node
 function _P.parse_label(state)
   local token = _P.expect(state, "op", "::")
   local name = _P.expect_name(state)
@@ -213,6 +276,12 @@ function _P.parse_label(state)
   return { kind = "LabelStatement", name = name.value, line = token.line }
 end
 
+--- Parse an `if`/`elseif`/`else` chain.
+--
+-- Each clause becomes its own `IfClause` node rather than a plain record, so
+-- the walker in `_ast` can descend into it without a special case.
+---@param state privata.ParseState
+---@return privata.Node  an IfStatement node
 function _P.parse_if(state)
   local token = _P.advance(state)
   local clauses = {}
@@ -246,6 +315,9 @@ function _P.parse_if(state)
   return { kind = "IfStatement", clauses = clauses, else_body = else_body, line = token.line }
 end
 
+--- Parse `while cond do ... end`.
+---@param state privata.ParseState
+---@return privata.Node  a WhileStatement node
 function _P.parse_while(state)
   local token = _P.advance(state)
   local cond = _P.parse_expression(state)
@@ -255,6 +327,12 @@ function _P.parse_while(state)
   return { kind = "WhileStatement", cond = cond, body = body, line = token.line }
 end
 
+--- Parse `repeat ... until cond`.
+--
+-- The condition is parsed after the body because it can read the body's locals,
+-- which is what makes `repeat` the one loop whose scope outlives its block.
+---@param state privata.ParseState
+---@return privata.Node  a RepeatStatement node
 function _P.parse_repeat(state)
   local token = _P.advance(state)
   local body = _P.parse_block(state)
@@ -263,6 +341,9 @@ function _P.parse_repeat(state)
   return { kind = "RepeatStatement", body = body, cond = cond, line = token.line }
 end
 
+--- Parse both `for` forms, which share a prefix up to the first name.
+---@param state privata.ParseState
+---@return privata.Node  a NumericFor node when an `=` follows, else a GenericFor
 function _P.parse_for(state)
   local token = _P.advance(state)
   local first = _P.expect_name(state)
@@ -307,6 +388,8 @@ end
 -- The dotted target is built as an ordinary index chain, method name included,
 -- so `function M.helper()` and `M.helper = function()` reach the checks as the
 -- same assignment shape. `is_method` records only that `self` was implicit.
+---@param state privata.ParseState
+---@return privata.Node  a FunctionDeclaration node
 function _P.parse_function_declaration(state)
   local token = _P.advance(state)
   local name = _P.expect_name(state)
@@ -335,6 +418,9 @@ function _P.parse_function_declaration(state)
   }
 end
 
+--- Parse `local x`, `local x <const>` and `local function f`.
+---@param state privata.ParseState
+---@return privata.Node  a LocalFunction node for `local function`, else LocalDeclaration
 function _P.parse_local(state)
   local token = _P.advance(state)
 
@@ -379,6 +465,14 @@ function _P.parse_local(state)
   }
 end
 
+--- Parse the statement forms that begin with an expression.
+--
+-- Lua allows only two: an assignment and a call. Both start the same way, so
+-- the expression is parsed first and what follows decides which it was. The
+-- assignability check happens here rather than in the grammar because `f() = 1`
+-- parses cleanly and is only wrong once you know what a target may be.
+---@param state privata.ParseState
+---@return privata.Node  an Assignment node or a CallStatement node
 function _P.parse_expression_statement(state)
   local token = _P.peek(state)
   local first = _P.parse_suffixed_expression(state)
@@ -404,6 +498,9 @@ function _P.parse_expression_statement(state)
   return { kind = "CallStatement", expr = first, line = token.line }
 end
 
+--- Parse one or more comma-separated expressions.
+---@param state privata.ParseState
+---@return privata.Node[]  expression nodes; always at least one
 function _P.parse_expression_list(state)
   local list = { _P.parse_expression(state) }
   while _P.accept(state, "op", ",") do
@@ -412,10 +509,22 @@ function _P.parse_expression_list(state)
   return list
 end
 
+--- Parse a full expression, binding as loosely as the grammar allows.
+---@param state privata.ParseState
+---@return privata.Node  an expression node
 function _P.parse_expression(state)
   return _P.parse_subexpression(state, 0)
 end
 
+--- Precedence climbing over the binary operators.
+--
+-- Stops at the first operator binding no tighter than `limit`, which is what
+-- makes associativity fall out of the table: a right-associative operator
+-- recurses with a limit below its own, so an equal operator to the right is
+-- taken as part of the operand rather than ending it.
+---@param state privata.ParseState
+---@param limit integer  left binding power the caller has already committed to
+---@return privata.Node  an expression node
 function _P.parse_subexpression(state, limit)
   local left
   local token = _P.peek(state)
@@ -452,6 +561,9 @@ function _P.parse_subexpression(state, limit)
   return left
 end
 
+--- Parse a literal, a function expression or a table, else fall through.
+---@param state privata.ParseState
+---@return privata.Node  an expression node
 function _P.parse_simple_expression(state)
   local token = _P.peek(state)
 
@@ -493,6 +605,12 @@ function _P.parse_simple_expression(state)
   return _P.parse_suffixed_expression(state)
 end
 
+--- Parse what a suffix chain can start from: a name or a parenthesised group.
+--
+-- Anything else is a syntax error, so the fall-through never returns. LuaLS
+-- cannot see that through `_P.fail`, which raises rather than returning.
+---@param state privata.ParseState
+---@return privata.Node  an Identifier node or a Paren node
 function _P.parse_primary_expression(state)
   local token = _P.peek(state)
 
@@ -510,9 +628,16 @@ function _P.parse_primary_expression(state)
     return { kind = "Paren", expr = inner, line = token.line }
   end
 
+  ---@diagnostic disable-next-line: missing-return
   _P.fail(token, "unexpected symbol")
 end
 
+--- Apply `.field`, `[key]`, `:method(...)` and call suffixes, left to right.
+--
+-- Every suffix node keeps the line of the expression it started from, not of
+-- the suffix, so a finding about `M.helper` points at where `M` was written.
+---@param state privata.ParseState
+---@return privata.Node  an expression node
 function _P.parse_suffixed_expression(state)
   local expr = _P.parse_primary_expression(state)
 
@@ -559,6 +684,8 @@ function _P.parse_suffixed_expression(state)
 end
 
 --- Parse the three call-argument forms: `f(x)`, `f"s"`, `f{t}`.
+---@param state privata.ParseState
+---@return privata.Node[]  argument expression nodes; empty for `f()`
 function _P.parse_call_arguments(state)
   local token = _P.peek(state)
 
@@ -588,6 +715,13 @@ function _P.parse_call_arguments(state)
   return args
 end
 
+--- Parse a table constructor.
+--
+-- All three entry forms become `TableField` nodes, positional ones with a nil
+-- key. A `name = value` key is stored as a String node marked `synthetic`, so a
+-- check scanning string literals does not mistake a field name for one.
+---@param state privata.ParseState
+---@return privata.Node  a TableExpr node
 function _P.parse_table(state)
   local token = _P.expect(state, "op", "{")
   local fields = {}
@@ -619,6 +753,7 @@ function _P.parse_table(state)
           kind = "String",
           value = field_token.value,
           raw = field_token.value,
+          synthetic = true,
           line = field_token.line,
         },
         value = _P.parse_expression(state),
@@ -645,11 +780,22 @@ function _P.parse_table(state)
   return { kind = "TableExpr", fields = fields, line = token.line }
 end
 
+--- True when the token after the current one is `=`.
+--
+-- One token of lookahead is what separates `{ x = 1 }` from `{ x }`: both start
+-- with a name, and only the next token says whether it is a key or a value.
+---@param state privata.ParseState
+---@return boolean
 function _P.check_next_is_assign(state)
   local next_token = _P.peek(state, 1)
   return next_token ~= nil and next_token.type == "op" and next_token.value == "="
 end
 
+--- Parse a parameter list and body, from the `(` through the closing `end`.
+---@param state privata.ParseState
+---@param line integer       line of the `function` keyword, which the node reports
+---@param is_method boolean  true to prepend the implicit `self` parameter
+---@return privata.Node  a FunctionExpr node
 function _P.parse_function_body(state, line, is_method)
   local params = {}
   local is_vararg = false
@@ -689,10 +835,23 @@ function _P.parse_function_body(state, line, is_method)
   }
 end
 
+--- Wrap a name token as an Identifier node.
+---@param token privata.Token
+---@return privata.Node  an Identifier node
 function _P.identifier(token)
   return { kind = "Identifier", name = token.value, line = token.line, col = token.col }
 end
 
+--- Build `a.b`, whose field name is stored as a String node.
+--
+-- `synthetic` marks it as a name the parser turned into a string, not a string
+-- literal the author wrote. Checks that scan string contents for dispatch --
+-- `v:lua.foo`, a name in a lookup table -- must not see every field access in
+-- the file as a string mentioning that field.
+---@param object privata.Node            the expression being indexed
+---@param field_token privata.Token  the name token after the `.` or `:`
+---@param computed boolean        true for `a[k]`, false for `a.b`
+---@return privata.Node  an Index node
 function _P.index_node(object, field_token, computed)
   return {
     kind = "Index",
@@ -701,6 +860,7 @@ function _P.index_node(object, field_token, computed)
       kind = "String",
       value = field_token.value,
       raw = field_token.value,
+      synthetic = true,
       line = field_token.line,
     },
     computed = computed,
@@ -714,6 +874,9 @@ end
 -- Returns the node, or nil plus `{ line, message }` when the source cannot be
 -- read whole. Callers turn the failure into an UnparsableModule rather than
 -- propagating it, so one bad file never aborts a scan of the others.
+---@param src string
+---@return privata.Node|nil chunk  a Chunk node, or nil when the source cannot be read
+---@return { line: integer, message: string }|nil error  set only when chunk is nil
 function M.parse(src)
   local ok, result = pcall(function()
     local tokens = lexer.tokenize(src)

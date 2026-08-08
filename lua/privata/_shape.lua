@@ -16,6 +16,7 @@ M.KINDS = {
   TABLE = "table", -- local M = {} ... return M
   CLASS = "class", -- local C = {}; C.__index = C ... return C
   LITERAL = "literal", -- return { a = a, b = b }
+  SIDE_EFFECT = "side_effect", -- returns nothing; runs for what it does
 }
 
 --- A `local X = {}` at chunk level, by name.
@@ -23,6 +24,8 @@ M.KINDS = {
 -- Only an empty table constructor counts. `local M = require("other")` returns
 -- someone else's table, and treating its fields as this file's symbols would
 -- report another module's interface against this file.
+---@param chunk privata.Node  a Chunk node
+---@return table<string, { name: string, line: integer }>
 function _P.table_locals(chunk)
   local out = {}
   for i = 1, #chunk.body do
@@ -40,6 +43,12 @@ function _P.table_locals(chunk)
   return out
 end
 
+--- True when `node` builds a table this file owns.
+--
+-- `setmetatable({}, mt)` still owns its table, so the wrapper is looked
+-- through; `require("other")` does not, and is deliberately not matched.
+---@param node privata.Node  an expression node
+---@return boolean
 function _P.is_table_source(node)
   if node.kind == "TableExpr" then
     return true
@@ -56,6 +65,8 @@ end
 -- `return setmetatable(M, mt)` publishes M, so the wrapper is peeled off. The
 -- metatable argument is not followed: a metatable supplies behaviour, not the
 -- exported names.
+---@param node privata.Node|nil  the returned expression node
+---@return privata.Node|nil  the expression actually published, or nil if none is
 function _P.unwrap_return(node)
   while node ~= nil do
     if node.kind == "Paren" then
@@ -73,6 +84,8 @@ end
 --
 -- `if jit then return A end return B` publishes different tables on different
 -- interpreters. Neither answer is right for every reader, so privata gives none.
+---@param chunk privata.Node  a Chunk node
+---@return boolean
 function _P.has_conditional_return(chunk)
   local last = chunk.body[#chunk.body]
   local found = false
@@ -85,6 +98,8 @@ function _P.has_conditional_return(chunk)
 end
 
 --- True when the file calls 5.1's `module()`, which publishes by side effect.
+---@param chunk privata.Node  a Chunk node
+---@return boolean
 function _P.uses_legacy_module(chunk)
   local found = false
   ast.walk_shallow(chunk, function(node)
@@ -97,23 +112,29 @@ end
 
 --- The name a file uses for its private namespace, when it has one.
 --
--- The configured name is looked for first, then any other private-looking table
--- local, so a project that has not configured `namespace` still gets its `_P`
--- recognised rather than reported as a pile of private-looking symbols.
+-- Only the configured name counts, and privata will not guess at a substitute.
+-- An earlier version fell back to any private-looking table local, which sounds
+-- accommodating and is not: `local _DEFAULT_ACCEPTED_CHARS = { ... }` is a
+-- private *constant*, not a namespace, and treating it as one made privata
+-- recommend moving unrelated functions into a table of characters.
+--
+-- A project that spells its namespace differently says so in `namespace`. The
+-- cost of not guessing is that such a project sees its fields reported until it
+-- does; the cost of guessing is advice that is confidently wrong.
+---@param table_locals table<string, { name: string, line: integer }>
+---@param configured string|nil  the namespace the config asks for
+---@return string|nil  the configured name when the file declares it, else nil
 function _P.find_private_namespace(table_locals, configured)
   if configured and table_locals[configured] then
     return configured
   end
-  local best = nil
-  for name in pairs(table_locals) do
-    if models.is_private_name(name) and (best == nil or name < best) then
-      best = name
-    end
-  end
-  return best
+  return nil
 end
 
 --- True when a chunk marks `name` as a metatable-based class.
+---@param chunk privata.Node  a Chunk node
+---@param name string  the returned table's local name
+---@return boolean
 function _P.is_class(chunk, name)
   local found = false
   ast.walk_shallow(chunk, function(node)
@@ -135,6 +156,8 @@ end
 -- holding data -- a preset, a lookup table, a set of constants -- is a *value*,
 -- and its fields cannot be made private without deleting them, so reporting
 -- them would produce advice nobody can follow.
+---@param literal_node privata.Node  a TableExpr node
+---@return boolean
 function _P.is_reexport_table(literal_node)
   if #literal_node.fields == 0 then
     return false
@@ -155,16 +178,25 @@ end
 --
 -- Returns a shape table. `kind` is one of `M.KINDS` when the file could be
 -- read, or nil with `reason` set from `models.UNANALYZABLE` when it could not.
+---@param chunk privata.Node       a Chunk node
+---@param config privata.Config|nil  supplies `namespace`; the default is used without one
+---@return privata.Shape  exactly one of `kind` and `reason` is set
 function M.detect(chunk, config)
-  local configured_namespace = config and config.namespace or nil
+  local configured_namespace = (config and config.namespace) or models.DEFAULT_NAMESPACE
 
   if _P.uses_legacy_module(chunk) then
     return { reason = models.UNANALYZABLE.LEGACY_MODULE, line = 1 }
   end
 
+  -- A file that returns nothing is a side-effect module, not a shape privata
+  -- failed to read. Setting autocommands, installing keymaps, registering
+  -- commands: the file runs for what it does, and exporting nothing is the
+  -- point rather than an omission. It exposes no interface, so it has no
+  -- symbols to report -- but it is still parsed, and the names it reads still
+  -- count as uses of the modules it requires.
   local last = chunk.body[#chunk.body]
   if last == nil or last.kind ~= "ReturnStatement" then
-    return { reason = models.UNANALYZABLE.NO_RETURN, line = last and last.line or 1 }
+    return { kind = M.KINDS.SIDE_EFFECT, line = last and last.line or 1 }
   end
 
   if _P.has_conditional_return(chunk) then
@@ -190,10 +222,12 @@ function M.detect(chunk, config)
       literal = returned,
       is_reexport_table = _P.is_reexport_table(returned),
       private_name = private_name,
+      table_locals = table_locals,
     }
   end
 
   if returned.kind == "Identifier" then
+    ---@cast returned privata.Identifier
     local declared = table_locals[returned.name]
     if declared == nil then
       -- The returned name is not a table this file built, so its fields belong
@@ -211,6 +245,7 @@ function M.detect(chunk, config)
       public_line = declared.line,
       return_line = last.line,
       private_name = private_name,
+      table_locals = table_locals,
     }
   end
 

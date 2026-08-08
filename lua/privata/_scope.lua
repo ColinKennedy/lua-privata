@@ -16,10 +16,40 @@ local ast = require("privata._ast")
 local M = {}
 local _P = {}
 
+---@class privata.Scope
+---@field parent privata.Scope|nil
+---@field names table<string, boolean>  names this scope binds
+---@field count integer                 how many, for the locals budget
+
+---@class privata.ScopeState
+---@field assigned { name: string, line: integer, kind: string, explicit: boolean }[]
+---@field read table<string, integer>  global name to the line that first reads it
+---@field max_function_locals integer  the largest per-function local count seen
+
+---@class privata.ScopeReport
+---@field assigned { name: string, line: integer, kind: string, explicit: boolean }[]
+---@field read table<string, integer>  globals the file only reads, to first line
+---@field chunk_locals integer         locals in the file's own top-level scope
+---@field max_function_locals integer  the most locals any one function declares
+
+--- A lexical scope: the names it binds, how many, and the scope enclosing it.
+--
+-- The count is kept alongside the names because the locals budget asks how many
+-- registers a function already spends, and `names` is a set -- there is nothing
+-- to count in it later without walking the whole table.
+---@param parent privata.Scope|nil  nil for the chunk's own top-level scope
+---@return privata.Scope
 function _P.new_scope(parent)
   return { parent = parent, names = {}, count = 0 }
 end
 
+--- Bind `name` in `scope`, counting it once however often it is redeclared.
+--
+-- Shadowing a name in the same scope (`local x` twice) is rare enough that
+-- undercounting it costs nothing, and the count only ever guards a
+-- recommendation: if privata is unsure a `local` will fit, it says so.
+---@param scope privata.Scope
+---@param name string
 function _P.declare(scope, name)
   if not scope.names[name] then
     scope.count = scope.count + 1
@@ -27,6 +57,13 @@ function _P.declare(scope, name)
   scope.names[name] = true
 end
 
+--- True when `name` is bound by this scope or any scope enclosing it.
+--
+-- This is the whole definition of "global" that the globals check uses: a name
+-- no enclosing scope binds is one Lua will look up in `_G`.
+---@param scope privata.Scope|nil
+---@param name string
+---@return boolean
 function _P.resolves(scope, name)
   while scope do
     if scope.names[name] then
@@ -38,16 +75,43 @@ function _P.resolves(scope, name)
 end
 
 --- Per-function local counts, so the caller can compare against Lua's limit.
+---@param state privata.ScopeState
+---@param scope privata.Scope  a scope whose function body is now fully walked
 function _P.note_function_scope(state, scope)
   if scope.count > state.max_function_locals then
     state.max_function_locals = scope.count
   end
 end
 
-function _P.record_global_assignment(state, name, line, kind)
-  state.assigned[#state.assigned + 1] = { name = name, line = line, kind = kind }
+--- `explicit` distinguishes `_G.foo = ...` from a missing `local`.
+--
+-- They are different mistakes, and only one of them is a mistake. Writing `_G.`
+-- is a declaration -- often the only way to reach a name from a host that can
+-- see nothing else -- while `function foo()` with no `local` is an accident.
+-- Telling the first "this should be local" is wrong advice.
+---@param state privata.ScopeState
+---@param name string
+---@param line integer
+---@param kind string             "function" or "value"
+---@param explicit boolean|nil    true when written as `_G.name`
+function _P.record_global_assignment(state, name, line, kind, explicit)
+  state.assigned[#state.assigned + 1] = {
+    name = name,
+    line = line,
+    kind = kind,
+    explicit = explicit or false,
+  }
 end
 
+--- Walk an expression, recording every name no enclosing scope binds.
+--
+-- A `FunctionExpr` is entered with a scope of its own, its parameters declared
+-- in it, and its locals counted separately once the body is done: Lua's limit
+-- on locals is per function, so a count that spanned the file would be a
+-- number no check could use.
+---@param state privata.ScopeState
+---@param node any    an expression node; anything else is ignored
+---@param scope privata.Scope
 function _P.visit_expression(state, node, scope)
   if not ast.is_node(node) then
     return
@@ -86,25 +150,37 @@ function _P.visit_expression(state, node, scope)
 end
 
 --- Visit an assignment target, where a bare name binds rather than reads.
+---@param state privata.ScopeState
+---@param node privata.Node  the target expression node
+---@param scope privata.Scope
+---@param kind string  "function" or "value", for the recorded assignment
 function _P.visit_target(state, node, scope, kind)
   if node.kind == "Identifier" then
+    ---@cast node privata.Identifier
     if not _P.resolves(scope, node.name) then
       _P.record_global_assignment(state, node.name, node.line, kind)
     end
     return
   end
 
-  -- `_G.name = ...` is the explicit spelling of the same thing, and says so
-  -- deliberately enough that it would be perverse not to report it.
   local dotted = ast.dotted_name(node)
   if dotted and dotted:sub(1, 3) == "_G." and not _P.resolves(scope, "_G") then
-    _P.record_global_assignment(state, dotted:sub(4), node.field_line or node.line, kind)
+    _P.record_global_assignment(state, dotted:sub(4), node.field_line or node.line, kind, true)
     return
   end
 
   _P.visit_expression(state, node, scope)
 end
 
+--- Dispatch one statement, threading scope through by hand.
+--
+-- Every branch here exists because that statement kind has its own rule about
+-- when its names become visible and to which of its children: a `local`'s
+-- initialiser cannot see it, a `local function`'s body can, and `repeat` shares
+-- one scope with its until-condition. That is what a generic walk cannot do.
+---@param state privata.ScopeState
+---@param node privata.Node  a statement node
+---@param scope privata.Scope  the block's scope, mutated as names are declared
 function _P.visit_statement(state, node, scope)
   local kind = node.kind
 
@@ -212,6 +288,13 @@ function _P.visit_statement(state, node, scope)
   -- Break, goto and label bind nothing and read nothing.
 end
 
+--- Visit statements in source order, all sharing one scope.
+--
+-- Order is the point: a `local` declared halfway down a block is a global read
+-- everywhere above it, and only a forward pass sees that.
+---@param state privata.ScopeState
+---@param statements privata.Node[]
+---@param scope privata.Scope
 function _P.visit_block(state, statements, scope)
   for i = 1, #statements do
     _P.visit_statement(state, statements[i], scope)
@@ -223,6 +306,8 @@ end
 -- Returns `assigned` (globals this file creates, in source order), `read` (a
 -- name-to-first-line map of globals it only reads), `chunk_locals` (locals in
 -- the file's own top-level scope) and `max_function_locals`.
+---@param chunk privata.Node  a Chunk node
+---@return privata.ScopeReport
 function M.analyze(chunk)
   local state = {
     assigned = {},

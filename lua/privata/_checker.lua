@@ -15,15 +15,34 @@ local source_roots = require("privata._source_roots")
 local M = {}
 local _P = {}
 
+--- Everything the symbol check needs that is not the modules themselves.
+--
+-- Gathered once and passed as one table because each entry is computed from the
+-- whole project: they cannot be derived per module inside the loop.
+---@class privata.SymbolCheckContext
+---@field cross table<string, boolean>        names some other module reads
+---@field external table<string, boolean>     names something outside Lua reaches
+---@field skip_modules table<string, boolean> modules already reported as a whole
+---@field test_read table<string, privata.Location>     where a spec reads a name
+---@field test_stubbed table<string, privata.Location>  where a spec replaces one
+---@field string_words table<string, privata.Location>  names seen in a string literal
+
 --- Symbols kept public by something outside the module graph.
 --
 -- A script in `build.install.bin` runs from a shell and a Neovim `setup`
 -- function is called by the host, so neither is reachable through any
 -- `require` privata can see. Treating them as unused would report the one
 -- symbol in the project that definitely is used.
+---@param project_root string
+---@param config privata.Config
+---@param modules table<string, privata.Module>
+---@return table<string, boolean>  set keyed `"module\0name"`
 function _P.external_interface(project_root, config, modules)
   local kept = {}
 
+  -- Whole-module publicity: the host can reach any name the module exports.
+  ---@param record privata.Module
+  ---@param name string  the module's dotted name
   local function keep_all(record, name)
     for index = 1, #record.symbols do
       kept[name .. "\0" .. record.symbols[index].name] = true
@@ -79,6 +98,10 @@ end
 -- A helper module living inside a declared test root exists to serve its own
 -- suite, so a name those tests read is used. Attribution is scoped per root, so
 -- a test file can never certify a production symbol.
+---@param test_roots string[]
+---@param modules table<string, privata.Module>
+---@param consumers privata.Consumer[]
+---@return table<string, boolean>  set keyed `"module\0name"`
 function _P.test_helper_references(test_roots, modules, consumers)
   local used = {}
 
@@ -107,7 +130,57 @@ function _P.test_helper_references(test_roots, modules, consumers)
   return used
 end
 
-function _P.global_findings(modules, config)
+--- Names handed to a host as `require'mod'.name` inside a string literal.
+--
+-- These are entry points, not cross-module reads, and the difference decides
+-- whether they are seen at all. The string is almost always written *in the
+-- module it names* -- `vim.wo.foldexpr = "v:lua.require'this.module'.foldexpr()"`
+-- sits beside the function it points at -- so the cross-reference rule, which
+-- correctly ignores a module reading itself, would drop every one of them.
+--
+-- What makes it public is not that another Lua module reads it; it is that
+-- something outside the Lua module graph resolves the name through `require` at
+-- evaluation time. That is the same category as a rockspec's installed script.
+---@param modules table<string, privata.Module>
+---@return table<string, boolean>  set keyed `"module\0name"`
+function _P.string_entrypoints(modules)
+  local kept = {}
+  for _, record in pairs(modules) do
+    if record.chunk then
+      local found = requires.string_references(record.chunk)
+      for i = 1, #found do
+        kept[found[i].module .. "\0" .. found[i].name] = true
+      end
+    end
+  end
+  return kept
+end
+
+--- Global names any module reaches through `v:lua.NAME` in a string literal.
+--
+-- `%{v:lua.get_winbar()%}` in a winbar expression can only reach `_G`, so the
+-- `_G.get_winbar = ...` shim beside it is the one line in the file that must be
+-- global. Reporting it as a leak is exactly backwards.
+---@param modules table<string, privata.Module>
+---@return table<string, privata.Location>  global name to where it is mentioned
+function _P.host_reachable_globals(modules)
+  local reachable = {}
+  for _, record in pairs(modules) do
+    if record.chunk then
+      for name, line in pairs(requires.vim_lua_globals(record.chunk)) do
+        reachable[name] = { path = record.path, line = line }
+      end
+    end
+  end
+  return reachable
+end
+
+--- Globals each module creates, minus the ones a host has to be able to reach.
+---@param modules table<string, privata.Module>
+---@param config privata.Config
+---@param host_reachable table<string, privata.Location>
+---@return privata.GlobalFinding[]  sorted by location
+function _P.global_findings(modules, config, host_reachable)
   local allowed = {}
   for i = 1, #(config.globals or {}) do
     allowed[config.globals[i]] = true
@@ -118,10 +191,12 @@ function _P.global_findings(modules, config)
     if record.scope then
       for i = 1, #record.scope.assigned do
         local entry = record.scope.assigned[i]
-        if not allowed[entry.name] and not record.ignored_lines[entry.line] then
+        local reached = host_reachable[entry.name]
+        if not allowed[entry.name] and not reached and not record.ignored_lines[entry.line] then
           findings[#findings + 1] = {
             name = entry.name,
             kind = entry.kind,
+            explicit = entry.explicit,
             module = name,
             path = record.path,
             line = entry.line,
@@ -133,16 +208,201 @@ function _P.global_findings(modules, config)
   return models.sort_findings(findings)
 end
 
-function _P.symbol_findings(modules, config, cross, external)
+--- Where each name is read or stubbed from a test root.
+--
+-- Test usage still does not make a symbol public -- that policy is unchanged.
+-- What it does do is constrain which privatisation is *legal*: a spec calling
+-- `mod.parse_diff` cannot follow a recommendation that moves the field to a
+-- file-local, because `mod` is the only handle the spec has. privata has always
+-- had this information and never asked it this question.
+---@param consumers privata.Consumer[]
+---@param modules table<string, privata.Module>
+---@return table<string, privata.Location> read     first spec read, keyed `"module\0name"`
+---@return table<string, privata.Location> stubbed  first spec stub, keyed the same
+function _P.test_usage(consumers, modules)
+  local read = {}
+  local stubbed = {}
+
+  for i = 1, #consumers do
+    local consumer = consumers[i]
+    if consumer.chunk and consumer.is_test_file then
+      local references = requires.references(consumer.chunk)
+      for index = 1, #references do
+        local reference = references[index]
+        if modules[reference.module] then
+          local key = reference.module .. "\0" .. reference.name
+          read[key] = read[key] or { path = consumer.path, line = reference.line }
+        end
+      end
+
+      local assignments = requires.field_assignments(consumer.chunk)
+      for index = 1, #assignments do
+        local assignment = assignments[index]
+        if modules[assignment.module] then
+          local key = assignment.module .. "\0" .. assignment.name
+          stubbed[key] = stubbed[key] or { path = consumer.path, line = assignment.line }
+        end
+      end
+    end
+  end
+
+  return read, stubbed
+end
+
+--- First sighting of each dispatch-shaped name in a string literal, project-wide.
+---@param modules table<string, privata.Module>
+---@return table<string, privata.Location>  name to where it was first seen
+function _P.string_dispatch_names(modules)
+  local words = {}
+  for _, record in pairs(modules) do
+    if record.chunk then
+      for word, where in pairs(requires.string_dispatch_names(record.chunk, record.path)) do
+        if words[word] == nil then
+          words[word] = where
+        end
+      end
+    end
+  end
+  return words
+end
+
+--- Where a test first reaches into this module, if anywhere.
+--
+-- The earliest by path then line, so the reported handle does not move when
+-- `pairs` hands the keys back in a different order.
+---@param module_name string
+---@param test_read table<string, privata.Location>  keyed `"module\0name"`
+---@return privata.Location|nil
+function _P.first_test_reader(module_name, test_read)
+  local prefix = module_name .. "\0"
+  local best = nil
+  for key, where in pairs(test_read) do
+    if key:sub(1, #prefix) == prefix then
+      if
+        best == nil
+        or where.path < best.path
+        or (where.path == best.path and where.line < best.line)
+      then
+        best = where
+      end
+    end
+  end
+  return best
+end
+
+--- The public table a file already has, if any, for the remedy wording.
+--
+-- A file that also declares a non-private table can merge into it; one that
+-- does not needs the namespace renamed outright.
+---@param detected privata.Shape
+---@return string|nil  the alphabetically first non-private table local, if any
+function _P.public_table_name(detected)
+  local best = nil
+  for name in pairs(detected.table_locals or {}) do
+    if not models.is_private_name(name) and (best == nil or name < best) then
+      best = name
+    end
+  end
+  return best
+end
+
+--- Modules that return the very table the config calls private.
+--
+-- `local _P = {} ... return _P` exports `_P`, so every field on it is public --
+-- the exact opposite of what naming it `_P` was meant to say. This is a
+-- contradiction in the module's structure, not a property of any one field, so
+-- it is reported once against the file, and its per-field findings are
+-- suppressed: they would restate this one problem per field, each pointing at a
+-- table the symbol already sits on.
+---@param module_name string
+---@param cross table<string, boolean>  set keyed `"module\0name"`
+---@return boolean  true when anything reads any of this module's names
+function _P.is_consumed(module_name, cross)
+  local prefix = module_name .. "\0"
+  for key in pairs(cross) do
+    if key:sub(1, #prefix) == prefix then
+      return true
+    end
+  end
+  return false
+end
+
+--- Modules whose returned table is the one the config calls private.
+---@param modules table<string, privata.Module>
+---@param config privata.Config
+---@param cross table<string, boolean>
+---@param test_read table<string, privata.Location>
+---@return privata.ExportedNamespaceFinding[] findings  sorted by location
+---@return table<string, boolean> offenders  modules the symbol check must skip
+function _P.exported_namespace_findings(modules, config, cross, test_read)
+  local findings = {}
+  local offenders = {}
+
+  for name, record in pairs(modules) do
+    local detected = record.shape
+    local line = detected and (detected.return_line or detected.public_line or 1)
+    if detected and detected.public_name == config.namespace and not record.ignored_lines[line] then
+      offenders[name] = true
+      findings[#findings + 1] = {
+        module = name,
+        path = record.path,
+        line = line,
+        namespace = config.namespace,
+        name = config.namespace,
+        public_table = _P.public_table_name(detected),
+        public_symbols = #record.symbols,
+        -- A module nothing consumes, whose table a spec holds, has no fix that
+        -- improves it: returning nothing breaks the spec and renaming to `M`
+        -- publishes fields no one reads. privata has already concluded it is a
+        -- test handle, and "test handle" is a clean bill of health, not the
+        -- highest-priority item in the file -- so it says so and stops leading
+        -- with it. The symbol check already changes its recommendation on test
+        -- evidence; this makes the export check consistent with that.
+        advisory = not _P.is_consumed(name, cross) and _P.first_test_reader(name, test_read) ~= nil,
+        -- Whether anything in production actually reads this return value
+        -- decides which advice is honest. A module nothing consumes is a
+        -- side-effect module whose table is a test handle, and telling its
+        -- author to rename it to `M` would publish an interface no one asked
+        -- for -- the opposite of what this tool is for.
+        consumed = _P.is_consumed(name, cross),
+        test_handle = _P.first_test_reader(name, test_read),
+      }
+    end
+  end
+
+  return models.sort_findings(findings), offenders
+end
+
+--- Public symbols that nothing outside their own module reads.
+--
+-- The symbol tables are annotated in place before being collected, so the
+-- recommendation and the test evidence travel with the finding.
+---@param modules table<string, privata.Module>
+---@param config privata.Config
+---@param context privata.SymbolCheckContext
+---@return privata.Symbol[]  sorted by location
+function _P.symbol_findings(modules, config, context)
   local findings = {}
 
   for name, record in pairs(modules) do
-    for i = 1, #record.symbols do
-      local symbol = record.symbols[i]
-      local key = name .. "\0" .. symbol.name
-      if not cross[key] and not external[key] and not record.ignored_lines[symbol.line] then
-        symbol.recommendation = recommend.for_symbol(symbol, record, config)
-        findings[#findings + 1] = symbol
+    -- A module that exports its private namespace is reported once, as that
+    -- one structural fact. Listing its fields as well would restate the same
+    -- problem per field, and point each one at a table it already sits on.
+    if not context.skip_modules[name] then
+      for i = 1, #record.symbols do
+        local symbol = record.symbols[i]
+        local key = name .. "\0" .. symbol.name
+        if
+          not context.cross[key]
+          and not context.external[key]
+          and not record.ignored_lines[symbol.line]
+        then
+          symbol.test_read = context.test_read[key]
+          symbol.test_stub = context.test_stubbed[key]
+          symbol.string_mention = context.string_words[symbol.name]
+          symbol.recommendation = recommend.for_symbol(symbol, record, config)
+          findings[#findings + 1] = symbol
+        end
       end
     end
   end
@@ -151,6 +411,9 @@ function _P.symbol_findings(modules, config, cross, external)
 end
 
 --- Run every enabled check against a project.
+---@param project_root string
+---@param config privata.Config
+---@return privata.Findings
 function M.run(project_root, config)
   local roots = source_roots.discover(project_root, config)
   local test_roots = source_roots.discover_test_roots(project_root, config)
@@ -190,12 +453,19 @@ function M.run(project_root, config)
   end
 
   local external = _P.external_interface(project_root, config, modules)
+  for key in pairs(_P.string_entrypoints(modules)) do
+    external[key] = true
+  end
+  local test_read, test_stubbed = _P.test_usage(consumers, modules)
+  local host_reachable = _P.host_reachable_globals(modules)
+  local string_words = _P.string_dispatch_names(modules)
 
   local findings = {
     roots = roots,
     unparsable = unparsable,
     unanalyzable = unanalyzable,
     collisions = collisions,
+    exported_namespaces = {},
     symbols = {},
     globals = {},
     private_module_requires = {},
@@ -204,19 +474,43 @@ function M.run(project_root, config)
     methods = {},
   }
 
+  -- Computed before the symbol check because it decides which modules that
+  -- check must stay quiet about.
+  --
+  -- It runs even when the check is switched off, because `namespace_offenders`
+  -- is what keeps the symbol check quiet about those files. Only the reporting
+  -- is optional; the analysis is not.
+  local exported_namespaces, namespace_offenders =
+    _P.exported_namespace_findings(modules, config, cross, test_read)
+  if config.checks.exported_namespaces then
+    findings.exported_namespaces = exported_namespaces
+  end
+
   if config.checks.symbols then
-    findings.symbols = _P.symbol_findings(modules, config, cross, external)
+    findings.symbols = _P.symbol_findings(modules, config, {
+      cross = cross,
+      external = external,
+      skip_modules = namespace_offenders,
+      test_read = test_read,
+      test_stubbed = test_stubbed,
+      string_words = string_words,
+    })
   end
   if config.checks.globals then
-    findings.globals = _P.global_findings(modules, config)
+    findings.globals = _P.global_findings(modules, config, host_reachable)
   end
   if config.checks.private_modules then
     findings.private_module_requires = models.sort_findings(
-      requires.private_module_requires(modules, config.private_module_patterns)
+      requires.private_module_requires(
+        modules,
+        config.private_module_patterns,
+        config.package_private
+      )
     )
   end
   if config.checks.private_symbols then
-    findings.private_symbol_reads = models.sort_findings(requires.private_symbol_reads(modules))
+    findings.private_symbol_reads =
+      models.sort_findings(requires.private_symbol_reads(modules, config.package_private))
   end
   if config.checks.exports then
     findings.export_issues = exports.collect(modules)
@@ -229,32 +523,74 @@ function M.run(project_root, config)
   return findings
 end
 
---- Whether a findings set contains anything that should fail a run.
+--- Findings of one kind that should count toward the exit code.
 --
--- The two unreliable-scan conditions are counted only when their override is
--- off. Downgrading one leaves its warning printed but stops it deciding the
--- exit code, which is the whole point of the flag.
-function M.has_failures(findings, config)
-  if #findings.unparsable > 0 and not config.skip_unparsable_files then
-    return true
+-- An advisory finding is exempt: privata has itself concluded there is no
+-- action that improves the file, so failing the build on it asks for work that
+-- cannot be done.
+---@param list table[]  findings of one kind
+---@return integer  how many of them are not advisory
+function _P.blocking_count(list)
+  local count = 0
+  for i = 1, #list do
+    if not list[i].advisory then
+      count = count + 1
+    end
   end
-  if #findings.collisions > 0 and not config.skip_module_collisions then
-    return true
-  end
-  return #findings.symbols > 0
-    or #findings.globals > 0
-    or #findings.private_module_requires > 0
-    or #findings.private_symbol_reads > 0
-    or #findings.export_issues > 0
-    or #findings.methods > 0
-    or #findings.unanalyzable > 0
+  return count
 end
 
+--- Whether a findings set contains anything that should fail a run.
+--
+-- `fail_on` names the kinds that block. It defaults to all of them, so the
+-- behaviour is unchanged, but it lets a project say "report this and do not
+-- block on it" -- which `checks` cannot express, because switching a check off
+-- also stops it reporting. A gate that can never go green gets `|| true`'d, and
+-- then the findings that *were* worth blocking on are lost with the rest.
+---@param findings privata.Findings
+---@param config privata.Config
+---@return boolean
+function M.has_failures(findings, config)
+  local blocking = {}
+  for i = 1, #(config.fail_on or {}) do
+    blocking[config.fail_on[i]] = true
+  end
+
+  if blocking.unparsable and #findings.unparsable > 0 and not config.skip_unparsable_files then
+    return true
+  end
+  if blocking.collisions and #findings.collisions > 0 and not config.skip_module_collisions then
+    return true
+  end
+
+  local kinds = {
+    unanalyzable = findings.unanalyzable,
+    symbols = findings.symbols,
+    globals = findings.globals,
+    exported_namespaces = findings.exported_namespaces,
+    private_modules = findings.private_module_requires,
+    private_symbols = findings.private_symbol_reads,
+    exports = findings.export_issues,
+    methods = findings.methods,
+  }
+  for kind, list in pairs(kinds) do
+    if blocking[kind] and _P.blocking_count(list) > 0 then
+      return true
+    end
+  end
+
+  return false
+end
+
+--- True when a scan found nothing at all, of any kind.
+---@param findings privata.Findings
+---@return boolean
 function _P.is_empty(findings)
   return #findings.unparsable == 0
     and #findings.collisions == 0
     and #findings.unanalyzable == 0
     and #findings.symbols == 0
+    and #findings.exported_namespaces == 0
     and #findings.globals == 0
     and #findings.private_module_requires == 0
     and #findings.private_symbol_reads == 0

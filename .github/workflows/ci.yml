@@ -19,11 +19,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: leafo/gh-actions-lua@v10
+      # v11 or newer is required for `luajit`: up to v10 the action fetched
+      # LuaJIT from luajit.org, which stopped publishing the 2.1 beta tarball, so
+      # the job died on a 404 before running a single spec. From v11 it clones
+      # the upstream git repository instead.
+      - uses: leafo/gh-actions-lua@v13
         with:
           luaVersion: ${{ matrix.lua }}
 
-      - uses: leafo/gh-actions-luarocks@v4
+      # v6 defaults to LuaRocks 3.13; v4 pinned 3.8, which cannot install
+      # anything under LuaJIT any more. LuaJIT caps a function at 65536
+      # constants and luarocks.org's Lua 5.1 manifest has outgrown that, so
+      # every rock lookup died on "main function has more than 65536 constants".
+      - uses: leafo/gh-actions-luarocks@v6
 
       - name: Install test dependencies
         run: |
@@ -49,31 +57,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: leafo/gh-actions-lua@v10
+      - uses: leafo/gh-actions-lua@v13
         with:
           luaVersion: "5.4"
 
-      - uses: leafo/gh-actions-luarocks@v4
+      - uses: leafo/gh-actions-luarocks@v6
 
       - run: luarocks install luacheck
-      - run: luacheck lua spec bin
+      - run: make luacheck
 
       - uses: JohnnyMorganz/stylua-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           version: latest
-          args: --check lua spec bin
+          args: --check lua spec bin scripts
+
+  llscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: "5.4"
+
+      - uses: leafo/gh-actions-luarocks@v6
+
+      # llscheck drives lua-language-server, which is a separate binary.
+      - uses: jdx/mise-action@v2
+        with:
+          tool_versions: |
+            lua-language-server latest
+
+      - run: luarocks install llscheck
+
+      # Clones the busted and luassert LuaCATS definitions first.
+      - run: make llscheck
 
   coverage:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: leafo/gh-actions-lua@v10
+      - uses: leafo/gh-actions-lua@v13
         with:
           luaVersion: "5.4"
 
-      - uses: leafo/gh-actions-luarocks@v4
+      - uses: leafo/gh-actions-luarocks@v6
 
       - name: Install test dependencies
         run: |
