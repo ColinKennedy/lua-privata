@@ -1,0 +1,94 @@
+--- Validate a literal `return { a = a }` export table.
+--
+-- This is the closest Lua has to Python's `__all__`: a hand-maintained list of
+-- what a module publishes, sitting apart from the definitions it names. Like
+-- `__all__`, it goes stale, and unlike `__all__` the failure is silent -- Lua
+-- exports `nil` for a name that does not exist rather than raising.
+
+local models = require("privata._models")
+local shape = require("privata._shape")
+
+local M = {}
+local _P = {}
+
+_P.ISSUES = {
+  UNKNOWN = "unknown",
+  PRIVATE = "private",
+  MISSING = "missing",
+}
+
+--- Names bound as locals at the chunk's top level.
+function _P.chunk_local_names(chunk)
+  local names = {}
+  for i = 1, #chunk.body do
+    local statement = chunk.body[i]
+    if statement.kind == "LocalDeclaration" then
+      for index = 1, #statement.names do
+        names[statement.names[index].name] = statement.names[index].line
+      end
+    elseif statement.kind == "LocalFunction" then
+      names[statement.name.name] = statement.name.line
+    end
+  end
+  return names
+end
+
+--- Check one module's literal export table.
+--
+-- Only a re-export list is validated. A literal holding data is not making a
+-- claim about bindings, so there is nothing for it to be wrong about.
+function _P.check_module(record)
+  local detected = record.shape
+  if detected.kind ~= shape.KINDS.LITERAL or not detected.is_reexport_table then
+    return {}
+  end
+
+  local locals = _P.chunk_local_names(record.chunk)
+  local issues = {}
+
+  for i = 1, #detected.literal.fields do
+    local field = detected.literal.fields[i]
+    local name = field.key.value
+    local bound = field.value.name
+
+    if locals[bound] == nil then
+      -- Lua exports nil for an unbound name rather than raising, so this is a
+      -- broken interface that no test necessarily catches.
+      issues[#issues + 1] = {
+        module = record.name,
+        path = record.path,
+        name = name,
+        binding = bound,
+        kind = _P.ISSUES.UNKNOWN,
+        line = field.line,
+      }
+    elseif models.is_private_name(name) then
+      issues[#issues + 1] = {
+        module = record.name,
+        path = record.path,
+        name = name,
+        binding = bound,
+        kind = _P.ISSUES.PRIVATE,
+        line = field.line,
+      }
+    end
+  end
+
+  return issues
+end
+
+--- Export-table issues across every module.
+function M.collect(modules)
+  local issues = {}
+  for _, record in pairs(modules) do
+    if record.chunk and record.shape then
+      local found = _P.check_module(record)
+      for i = 1, #found do
+        issues[#issues + 1] = found[i]
+      end
+    end
+  end
+  return models.sort_findings(issues)
+end
+
+return M

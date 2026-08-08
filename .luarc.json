@@ -1,0 +1,18 @@
+{
+  "runtime.version": "Lua 5.1",
+  "workspace.library": [],
+  "diagnostics.globals": [
+    "describe",
+    "it",
+    "setup",
+    "teardown",
+    "before_each",
+    "after_each",
+    "pending",
+    "finally",
+    "spy",
+    "stub",
+    "mock"
+  ],
+  "workspace.ignoreDir": [".luarocks", "lua_modules"]
+}

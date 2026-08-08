@@ -1,0 +1,15 @@
+-- Coverage configuration. The gate lives in scripts/check_coverage.lua and CI
+-- passes it a threshold; luacov itself only reports.
+--
+-- The threshold is 92, not 100, and the difference is structural rather than
+-- laziness. `_fs.lua` carries three filesystem backends -- Neovim's `vim.uv`,
+-- `lfs`, and a `find` fallback -- and exactly one of them can execute on any
+-- given interpreter. Two thirds of that file is unreachable in any single run,
+-- so a 100% gate could only be met by deleting the portability it exists for.
+-- Everything else is expected to stay near 100.
+return {
+  include = { "lua/privata" },
+  exclude = { "spec/", "luacov" },
+  runreport = true,
+  deletestats = false,
+}

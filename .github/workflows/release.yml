@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: leafo/gh-actions-lua@v10
+        with:
+          luaVersion: "5.4"
+
+      - uses: leafo/gh-actions-luarocks@v4
+
+      - name: Derive the rock version from the tag
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          echo "rock=${tag}-1" >> "$GITHUB_OUTPUT"
+
+      - name: Generate the versioned rockspec
+        # The checked-in rockspec tracks the working tree; a release needs one
+        # pinned to the tag, so it is derived rather than maintained twice.
+        run: |
+          version="${{ steps.version.outputs.rock }}"
+          target="privata-${version}.rockspec"
+          sed \
+            -e "s|^version = .*|version = \"${version}\"|" \
+            -e "s|url = \"git+\(.*\)\"|url = \"git+\1\",\n  tag = \"${GITHUB_REF_NAME}\"|" \
+            privata-scm-1.rockspec > "$target"
+          cat "$target"
+          echo "ROCKSPEC=$target" >> "$GITHUB_ENV"
+
+      - name: Verify the rockspec is installable
+        run: luarocks make --local "$ROCKSPEC"
+
+      - name: Verify the version matches the tag
+        # A tag that disagrees with the version the module reports would ship a
+        # rock that lies about itself.
+        run: |
+          reported=$(lua -e 'package.path="./lua/?.lua;./lua/?/init.lua;"..package.path; io.write(require("privata")._VERSION)')
+          expected="${GITHUB_REF_NAME#v}"
+          if [ "$reported" != "$expected" ]; then
+            echo "privata._VERSION is $reported but the tag is $expected"
+            exit 1
+          fi
+
+      - name: Pack the rock
+        run: luarocks pack "$ROCKSPEC"
+
+      - name: Upload to LuaRocks
+        env:
+          LUAROCKS_API_KEY: ${{ secrets.LUAROCKS_API_KEY }}
+        run: luarocks upload "$ROCKSPEC" --api-key="$LUAROCKS_API_KEY"
+
+      - name: Attach artefacts to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.rockspec
+            *.rock
+          generate_release_notes: true
