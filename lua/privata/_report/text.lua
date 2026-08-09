@@ -49,13 +49,39 @@ end
 --- Start a section, separated from whatever came before it.
 ---@param out string[]  appended to in place
 ---@param heading string
-function _P.section(out, heading)
+---@param notes string[]|nil  a preamble printed under the heading, set off by
+---                           its own blank line, before the findings
+function _P.section(out, heading, notes)
   if #out > 0 then
     out[#out + 1] = ""
   end
   out[#out + 1] = heading
   out[#out + 1] = ""
+  if notes then
+    for i = 1, #notes do
+      out[#out + 1] = notes[i]
+    end
+    out[#out + 1] = ""
+  end
 end
+
+--- The one remedy three of the sections share, and the only one the report
+--- cannot derive.
+--
+-- Every finding below is inferred from usage inside this checkout, so a name
+-- called by a host or by a downstream consumer looks identical to one nobody
+-- calls. That is not a gap privata can close by reading harder -- the caller is
+-- not here.
+--
+-- Phrased as an instruction with the settings written out, rather than as a
+-- caveat naming two options: the reader is deciding what to do about the list
+-- underneath, and one who has to go find the syntax in the README will not.
+_P.ENTRYPOINT_HINT = {
+  "  To mark any of these public on purpose, declare it in `.privata.lua` rather than",
+  "  privatising it -- privata cannot see callers outside this checkout:",
+  '      entrypoint_names = { "setup" }        -- one name, wherever it is defined',
+  '      entrypoint_modules = { "mylib.api" }  -- everything a module exports',
+}
 
 --- Report files that could not be parsed.
 --
@@ -240,13 +266,15 @@ end
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.FunctionModuleFinding[]
 ---@param project_root string  paths are printed relative to this
-function _P.function_modules(out, findings, project_root)
+---@param hint boolean|nil  print the entrypoint hint under this section's heading
+function _P.function_modules(out, findings, project_root, hint)
   _P.section(
     out,
     string.format(
       "Found %s returning a function that nothing requires:",
       models.count(#findings, "module")
-    )
+    ),
+    hint and _P.ENTRYPOINT_HINT or nil
   )
   for i = 1, #findings do
     local entry = findings[i]
@@ -282,10 +310,12 @@ end
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.Symbol[]
 ---@param project_root string  paths are printed relative to this
-function _P.symbols(out, findings, project_root)
+---@param hint boolean|nil  print the entrypoint hint under this section's heading
+function _P.symbols(out, findings, project_root, hint)
   _P.section(
     out,
-    string.format("Found %s that could be made private:", models.count(#findings, "public symbol"))
+    string.format("Found %s that could be made private:", models.count(#findings, "public symbol")),
+    hint and _P.ENTRYPOINT_HINT or nil
   )
   -- The namespace-declaration hint is per file, not per symbol. Printed once
   -- per finding it accounted for eighty-odd identical lines on a real repo.
@@ -421,6 +451,13 @@ function _P.private_symbol_reads(out, findings, project_root, config)
   end
   table.sort(order)
 
+  -- The option that resolves this whole section exists and nothing else here
+  -- points at it. A user who has to find it in the README will not.
+  local note = nil
+  if config and #(config.package_private or {}) == 0 then
+    note = { "  (if these are package-internal by design, set `package_private`)" }
+  end
+
   -- Both numbers, because they are both true and they are not the same one:
   -- how many names leak, and how much of the codebase depends on them leaking.
   _P.section(
@@ -429,14 +466,9 @@ function _P.private_symbol_reads(out, findings, project_root, config)
       "Found %s read from another module (%s):",
       models.count(#order, "private symbol"),
       models.count(#findings, "read")
-    )
+    ),
+    note
   )
-  if config and #(config.package_private or {}) == 0 then
-    -- The option that resolves this whole section exists and nothing else here
-    -- points at it. A user who has to find it in the README will not.
-    out[#out + 1] = "  (if these are package-internal by design, set `package_private`)"
-    out[#out + 1] = ""
-  end
 
   for i = 1, #order do
     local readers = groups[order[i]]
@@ -482,7 +514,8 @@ end
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.Method[]
 ---@param project_root string  paths are printed relative to this
-function _P.methods(out, findings, project_root)
+---@param hint boolean|nil  print the entrypoint hint under this section's heading
+function _P.methods(out, findings, project_root, hint)
   local groups = {}
   local order = {}
   for i = 1, #findings do
@@ -502,7 +535,8 @@ function _P.methods(out, findings, project_root)
       "Found %s in %s that could be made private:",
       models.count(#findings, "public method"),
       models.count(#order, "class", "classes")
-    )
+    ),
+    hint and _P.ENTRYPOINT_HINT or nil
   )
 
   for i = 1, #order do
@@ -587,14 +621,21 @@ function M.render(findings, project_root, config)
   if #findings.exported_namespaces > 0 then
     _P.exported_namespaces(out, findings.exported_namespaces, project_root)
   end
+  -- Three sections, one shared remedy, printed once -- under whichever of them
+  -- the run happens to reach first. Repeating it per section would be three
+  -- identical paragraphs in a report that already asks a lot of its reader, and
+  -- the hint is about the codebase rather than about any one finding.
+  local hint = true
   if #findings.function_modules > 0 then
-    _P.function_modules(out, findings.function_modules, project_root)
+    _P.function_modules(out, findings.function_modules, project_root, hint)
+    hint = false
   end
   if #findings.symbols > 0 then
-    _P.symbols(out, findings.symbols, project_root)
+    _P.symbols(out, findings.symbols, project_root, hint)
+    hint = false
   end
   if #findings.methods > 0 then
-    _P.methods(out, findings.methods, project_root)
+    _P.methods(out, findings.methods, project_root, hint)
   end
   if #findings.private_module_requires > 0 then
     _P.private_module_requires(out, findings.private_module_requires, project_root)

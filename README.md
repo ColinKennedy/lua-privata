@@ -45,6 +45,11 @@ privata reports:
 ```text
 Found 1 public symbol that could be made private:
 
+  To mark any of these public on purpose, declare it in `.privata.lua` rather than
+  privatising it -- privata cannot see callers outside this checkout:
+      entrypoint_names = { "setup" }        -- one name, wherever it is defined
+      entrypoint_modules = { "mylib.api" }  -- everything a module exports
+
   lua/example/service.lua:3: function `M.helper` -> move to `_P.helper`
       also read at :8
       add `local _P = {}` near the top of the file
@@ -53,6 +58,10 @@ Found 1 public symbol that could be made private:
 `M.run` calling `M.helper` is not evidence that `helper` is public — it is
 precisely the situation being reported. Note that privata names the *readers*
 too: unlike a Python rename, acting on this means rewriting every call site.
+
+The parenthetical names the one thing privata cannot infer: a function called
+from outside this checkout looks exactly like one nobody calls. Declaring it in
+`.privata.lua` is the fix — see "What privata cannot see".
 
 ## Install
 

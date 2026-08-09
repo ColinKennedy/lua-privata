@@ -111,6 +111,62 @@ return C
       end)
     end)
 
+    it("points at the entrypoint options when it reports a public symbol", function()
+      -- The remedy for a false positive here is not in the code, so it cannot
+      -- be inferred from the report: the caller lives outside the checkout.
+      render(
+        {
+          ["lua/pkg/init.lua"] = "local M = {}\nfunction M.setup() end\nreturn M",
+        },
+        nil,
+        function(text)
+          assert.matches("declare it in `%.privata%.lua`", text)
+          assert.matches("entrypoint_names", text)
+          assert.matches("entrypoint_modules", text)
+        end
+      )
+    end)
+
+    it("prints the entrypoint hint once, however many sections want it", function()
+      -- Three sections share the remedy. Saying it three times would be three
+      -- identical paragraphs between the reader and the findings.
+      render({
+        ["lua/pkg/orphan.lua"] = "local function run() end\nreturn run",
+        ["lua/pkg/point.lua"] = [[
+local C = {}
+C.__index = C
+function C:a() end
+return C
+]],
+        ["lua/pkg/init.lua"] = "local M = {}\nfunction M.setup() end\nreturn M",
+      }, { methods = true }, function(text)
+        assert.matches("returning a function that nothing requires", text)
+        assert.matches("public symbol", text)
+        assert.matches("public method", text)
+
+        local count = 0
+        for _ in text:gmatch("declare it in `%.privata%.lua`") do
+          count = count + 1
+        end
+        assert.equal(1, count)
+      end)
+    end)
+
+    it("omits the entrypoint hint from sections it cannot resolve", function()
+      -- A global is a defect rather than an interface decision, and no
+      -- entrypoint setting makes `leaked = 1` correct.
+      render(
+        {
+          ["lua/pkg/init.lua"] = "leaked = 1\nlocal M = {}\nreturn M",
+        },
+        nil,
+        function(text)
+          assert.matches("global binding", text)
+          assert.is_nil(text:find("entrypoint_names", 1, true))
+        end
+      )
+    end)
+
     it("switches error to warning when a scan override is on", function()
       local files = {
         ["thing-scm-1.rockspec"] = ROCKSPEC,
