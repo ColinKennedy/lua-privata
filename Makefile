@@ -18,9 +18,9 @@ ARGUMENTS ?=
 COVERAGE_THRESHOLD ?= 92
 
 # Everything CI runs, in the order CI runs it.
-all: check
+all: check test
 
-check: luacheck check-stylua llscheck test privata
+check: check-stylua luacheck privata llscheck
 
 # LuaCATS definitions for the busted globals and luassert's `assert.same` and
 # friends. Without them llscheck reports every spec assertion as an undefined
