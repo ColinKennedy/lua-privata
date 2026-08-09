@@ -16,6 +16,7 @@ M.KINDS = {
   TABLE = "table", -- local M = {} ... return M
   CLASS = "class", -- local C = {}; C.__index = C ... return C
   LITERAL = "literal", -- return { a = a, b = b }
+  FUNCTION = "function", -- local function run() end ... return run
   SIDE_EFFECT = "side_effect", -- returns nothing; runs for what it does
 }
 
@@ -35,6 +36,34 @@ function _P.table_locals(chunk)
         local value = statement.values[index]
         local name = statement.names[index].name
         if value ~= nil and _P.is_table_source(value) then
+          out[name] = { name = name, line = statement.names[index].line }
+        end
+      end
+    end
+  end
+  return out
+end
+
+--- A chunk-level local bound to a function literal, by name.
+--
+-- Kept apart from `table_locals` because the two answer different questions. A
+-- table local is a namespace whose *fields* are the interface; a function local
+-- *is* the interface, entire. Only a literal function counts: `local run =
+-- require("other")` hands back someone else's callable, and this file has no
+-- say over it.
+---@param chunk privata.Node  a Chunk node
+---@return table<string, { name: string, line: integer }>
+function _P.function_locals(chunk)
+  local out = {}
+  for i = 1, #chunk.body do
+    local statement = chunk.body[i]
+    if statement.kind == "LocalFunction" then
+      out[statement.name.name] = { name = statement.name.name, line = statement.line }
+    elseif statement.kind == "LocalDeclaration" then
+      for index = 1, #statement.names do
+        local value = statement.values[index]
+        if value ~= nil and value.kind == "FunctionExpr" then
+          local name = statement.names[index].name
           out[name] = { name = name, line = statement.names[index].line }
         end
       end
@@ -226,10 +255,36 @@ function M.detect(chunk, config)
     }
   end
 
+  -- `return function(x) ... end`. A module whose whole export is one function is
+  -- a real idiom -- `local get_foo = require("thing.get_foo"); get_foo(10)` --
+  -- and it is fully readable: there is no table, so there are no fields to
+  -- mislabel. What can still be wrong about it is whether anything requires the
+  -- module at all, which `_checker` asks separately.
+  if returned.kind == "FunctionExpr" then
+    return {
+      kind = M.KINDS.FUNCTION,
+      public_line = returned.line,
+      return_line = last.line,
+      private_name = private_name,
+      table_locals = table_locals,
+    }
+  end
+
   if returned.kind == "Identifier" then
     ---@cast returned privata.Identifier
     local declared = table_locals[returned.name]
     if declared == nil then
+      local declared_function = _P.function_locals(chunk)[returned.name]
+      if declared_function then
+        return {
+          kind = M.KINDS.FUNCTION,
+          public_name = returned.name,
+          public_line = declared_function.line,
+          return_line = last.line,
+          private_name = private_name,
+          table_locals = table_locals,
+        }
+      end
       -- The returned name is not a table this file built, so its fields belong
       -- to whatever produced it.
       return { reason = models.UNANALYZABLE.COMPUTED_RETURN, line = last.line }

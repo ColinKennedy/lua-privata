@@ -114,6 +114,8 @@ local _P = {}
 ---@field symbols privata.Symbol[]
 ---@field private_symbols privata.Symbol[]
 ---@field ignored_lines table<integer, boolean>
+---@field used_ignores table<integer, boolean>  lines whose ignore suppressed something
+---@field bare_ignores table<integer, boolean>  ignored lines holding no code
 ---@field exports table<string, boolean>
 ---@field is_test_helper boolean|nil  true for a helper co-located with the specs
 
@@ -134,7 +136,8 @@ local _P = {}
 ---@field kind string|nil        one of `_shape.KINDS` when the file could be read
 ---@field reason string|nil      one of `models.UNANALYZABLE` when it could not
 ---@field line integer|nil       where to point when reporting a `reason`
----@field public_name string|nil the local name of the returned table
+---@field public_name string|nil the local name of the returned table or function;
+---                              absent when a FUNCTION shape returns an unnamed one
 ---@field public_line integer|nil where that local is declared
 ---@field return_line integer|nil where the file returns it
 ---@field private_name string|nil the private namespace, when the file declares one
@@ -215,6 +218,27 @@ local _P = {}
 ---@field advisory boolean                 true when no fix would improve the file
 ---@field test_handle privata.Location|nil where a spec holds the table
 
+--- A module whose whole export is a function, that nothing requires.
+--
+-- The module-level twin of an unread public field: a file returning a function
+-- publishes no fields, so the require is the only evidence it is used, and the
+-- remedy is a rename of the module rather than a move of a symbol.
+---@class privata.FunctionModuleFinding
+---@field module string
+---@field path string
+---@field line integer               where the returned function is written
+---@field name string                its local name, or the module's last segment
+---@field anonymous boolean          true when the file returns an unnamed function
+---@field private_module string|nil  the private name to rename to, when one can be derived
+---@field test_require privata.Location|nil  where a spec requires it, if one does
+
+--- An `-- privata: ignore` that suppressed nothing this run.
+---@class privata.StaleIgnoreFinding
+---@field module string
+---@field path string
+---@field line integer
+---@field bare boolean  true when the comment sits on a line holding no code
+
 ---@class privata.PrivateModuleRequireFinding
 ---@field module string             the private module being required
 ---@field path string               where that module lives
@@ -246,12 +270,20 @@ local _P = {}
 ---@field collisions privata.CollisionFinding[]
 ---@field unanalyzable privata.UnanalyzableFinding[]
 ---@field exported_namespaces privata.ExportedNamespaceFinding[]
+---@field function_modules privata.FunctionModuleFinding[]
 ---@field symbols privata.Symbol[]
 ---@field globals privata.GlobalFinding[]
 ---@field private_module_requires privata.PrivateModuleRequireFinding[]
 ---@field private_symbol_reads privata.PrivateSymbolReadFinding[]
 ---@field export_issues privata.ExportIssueFinding[]
 ---@field methods privata.Method[]
+---@field stale_ignores privata.StaleIgnoreFinding[]
+
+--- The comment that suppresses a finding on the line it is written on.
+--
+-- Defined here rather than where it is matched, so the check that reads it and
+-- the report that tells a user to delete it cannot drift apart.
+M.IGNORE_COMMENT = "privata: ignore"
 
 --- The private namespace privata recommends when a config does not say
 --- otherwise. Defined here so `_config` and `_shape` cannot drift apart: one
@@ -295,6 +327,29 @@ _P.CONVENTIONAL_PUBLIC_NAMES = {
   _COPYRIGHT = true,
   _LICENSE = true,
 }
+
+--- True when the file suppresses a finding on `line`, recording that it did.
+--
+-- Every check asks this rather than reading `ignored_lines` itself, which is
+-- what lets privata tell a suppression that is doing work from one left behind
+-- by a finding somebody already fixed. The recording is a side effect on the
+-- record, and it is here rather than in each check for the reason the two name
+-- predicates are: the checks must all agree on what an ignore means, and one of
+-- them forgetting to mark would report a live suppression as removable.
+--
+-- Ask this *last* in a condition. A finding privata dropped for another reason
+-- was never suppressed by the comment, and crediting the comment for it would
+-- hide the very staleness this exists to find.
+---@param record privata.Module
+---@param line integer
+---@return boolean
+function M.is_ignored(record, line)
+  if not record.ignored_lines[line] then
+    return false
+  end
+  record.used_ignores[line] = true
+  return true
+end
 
 --- True for a name that its own module marks as internal.
 --

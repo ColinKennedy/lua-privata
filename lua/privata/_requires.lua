@@ -15,6 +15,7 @@
 -- positive gets acted on with a rewrite that breaks working code.
 
 local ast = require("privata._ast")
+local models = require("privata._models")
 
 local M = {}
 local _P = {}
@@ -90,6 +91,14 @@ end
 -- Matched exactly rather than by bare name, so this costs no true positives.
 local REQUIRE_IN_STRING = "require%s*%(?%s*[\"'`]?([%w_%.%-]+)[\"'`]?%s*%)?%s*%.%s*([%w_]+)"
 
+--- `require'mod'` written in a string with no field indexed after it.
+--
+-- The pattern above only matches a require that is *indexed*, which is every
+-- reference to a table module. A module whose whole export is a function is
+-- reached without indexing anything -- `"lua require('pkg.toggle')()"` in a
+-- keymap -- so it needs its own matcher.
+local REQUIRE_MODULE_IN_STRING = "require%s*%(?%s*[\"'`]([%w_%.%-]+)[\"'`]"
+
 --- `v:lua.NAME`, which reaches a *global* rather than a module field.
 local VIM_LUA_GLOBAL = "v:lua%.([%w_]+)"
 
@@ -104,6 +113,27 @@ function M.string_references(chunk)
     end
     for module_name, field in node.value:gmatch(REQUIRE_IN_STRING) do
       found[#found + 1] = { module = module_name, name = field, line = node.line }
+    end
+  end)
+  return found
+end
+
+--- Modules named by a `require` written inside a string literal.
+--
+-- Same category as `string_references`, and credited for the same reason:
+-- something outside the Lua module graph resolves the name at evaluation time.
+-- This one records only the module, so it sees a require whose result is called
+-- rather than indexed.
+---@param chunk privata.Node  a Chunk node
+---@return { module: string, line: integer }[]
+function _P.string_module_references(chunk)
+  local found = {}
+  ast.walk(chunk, function(node)
+    if node.kind ~= "String" or node.synthetic or type(node.value) ~= "string" then
+      return
+    end
+    for module_name in node.value:gmatch(REQUIRE_MODULE_IN_STRING) do
+      found[#found + 1] = { module = module_name, line = node.line }
     end
   end)
   return found
@@ -303,6 +333,50 @@ function _P.required_modules(chunk)
   return out
 end
 
+--- Where each module is first required, across a list of consumers.
+--
+-- The module-level counterpart of `cross_references`. A module's *fields* are
+-- what the symbol check counts, but a module whose whole export is one value has
+-- no fields, so the require itself is the only evidence anyone uses it. A
+-- self-require does not count, for the same reason a module reading its own
+-- field does not: that is the situation being reported.
+--
+-- The earliest require by path then line wins, so the location a report prints
+-- does not move when `pairs` hands its keys back in a different order.
+---@param consumer_list { name: string, path: string, chunk: privata.Node|nil }[]
+---@return table<string, privata.Location>  module name to where it is first required
+function M.module_requires_from(consumer_list)
+  local found = {}
+
+  for i = 1, #consumer_list do
+    local consumer = consumer_list[i]
+    if consumer.chunk then
+      local required = _P.required_modules(consumer.chunk)
+      local from_strings = _P.string_module_references(consumer.chunk)
+      for index = 1, #from_strings do
+        required[#required + 1] = from_strings[index]
+      end
+
+      for index = 1, #required do
+        local entry = required[index]
+        local best = found[entry.module]
+        if
+          entry.module ~= consumer.name
+          and (
+            best == nil
+            or consumer.path < best.path
+            or (consumer.path == best.path and entry.line < best.line)
+          )
+        then
+          found[entry.module] = { path = consumer.path, line = entry.line }
+        end
+      end
+    end
+  end
+
+  return found
+end
+
 --- Symbols of `modules` that some *other* module reads.
 --
 -- Returns a set keyed `"module\0name"`. Consumers default to the modules
@@ -354,10 +428,15 @@ function M.cross_references_from(modules, consumer_list)
 end
 
 --- True when a module name has a segment matching one of the private patterns.
+--
+-- Public because two checks share the one definition of "this module is already
+-- marked internal": the require check, which reports reaching into it, and the
+-- function-module check, which has nothing to recommend for a module that is
+-- private already.
 ---@param module_name string   dotted module name
 ---@param patterns string[]    Lua patterns matched against each segment
 ---@return boolean
-function _P.is_private_module(module_name, patterns)
+function M.is_private_module(module_name, patterns)
   for segment in module_name:gmatch("[^.]+") do
     for i = 1, #patterns do
       if segment:find(patterns[i]) then
@@ -454,10 +533,10 @@ function M.private_module_requires(modules, patterns, package_private)
         if
           modules[target]
           and target ~= consumer_name
-          and _P.is_private_module(target, patterns)
+          and M.is_private_module(target, patterns)
           and not (owner and _P.is_within_package(consumer_name, owner))
           and not _P.shares_package(target, consumer_name, package_private)
-          and not consumer.ignored_lines[required[i].line]
+          and not models.is_ignored(consumer, required[i].line)
         then
           findings[#findings + 1] = {
             module = target,
@@ -506,7 +585,7 @@ function M.private_symbol_reads(modules, package_private)
           and owner
           and owner[reference.name]
           and not _P.shares_package(reference.module, consumer_name, package_private)
-          and not consumer.ignored_lines[reference.line]
+          and not models.is_ignored(consumer, reference.line)
         then
           findings[#findings + 1] = {
             module = reference.module,

@@ -71,7 +71,7 @@ function _P.check_module(record)
       kind = _P.ISSUES.PRIVATE
     end
 
-    if kind ~= nil and not record.ignored_lines[field.line] then
+    if kind ~= nil and not models.is_ignored(record, field.line) then
       issues[#issues + 1] = {
         module = record.name,
         path = record.path,

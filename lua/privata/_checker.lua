@@ -10,6 +10,7 @@ local modules_mod = require("privata._modules")
 local recommend = require("privata._recommend")
 local requires = require("privata._requires")
 local rockspec = require("privata._rockspec")
+local shape = require("privata._shape")
 local source_roots = require("privata._source_roots")
 
 local M = {}
@@ -79,18 +80,30 @@ function _P.external_interface(project_root, config, modules)
     end
   end
 
-  for i = 1, #(config.entrypoint_modules or {}) do
-    local pattern = "^" .. config.entrypoint_modules[i]:gsub("%.", "%%."):gsub("%*", ".*") .. "$"
-    for name, record in pairs(modules) do
-      if name:find(pattern) then
-        for index = 1, #record.symbols do
-          kept[name .. "\0" .. record.symbols[index].name] = true
-        end
-      end
+  for name, record in pairs(modules) do
+    if _P.is_entrypoint_module(name, config.entrypoint_modules or {}) then
+      keep_all(record, name)
     end
   end
 
   return kept
+end
+
+--- True when a module name matches one of the configured entrypoint patterns.
+--
+-- `*` stands for any run of characters and everything else is literal, so
+-- `*.health` reads as a glob rather than as a Lua pattern nobody wrote.
+---@param module_name string
+---@param patterns string[]  from `entrypoint_modules`
+---@return boolean
+function _P.is_entrypoint_module(module_name, patterns)
+  for i = 1, #patterns do
+    local pattern = "^" .. patterns[i]:gsub("%.", "%%."):gsub("%*", ".*") .. "$"
+    if module_name:find(pattern) then
+      return true
+    end
+  end
+  return false
 end
 
 --- Names that co-located test files certify for helper modules in a test root.
@@ -192,7 +205,11 @@ function _P.global_findings(modules, config, host_reachable)
       for i = 1, #record.scope.assigned do
         local entry = record.scope.assigned[i]
         local reached = host_reachable[entry.name]
-        if not allowed[entry.name] and not reached and not record.ignored_lines[entry.line] then
+        if
+          not allowed[entry.name]
+          and not reached
+          and not models.is_ignored(record, entry.line)
+        then
           findings[#findings + 1] = {
             name = entry.name,
             kind = entry.kind,
@@ -340,13 +357,20 @@ function _P.exported_namespace_findings(modules, config, cross, test_read)
 
   for name, record in pairs(modules) do
     local detected = record.shape
-    local line = detected and (detected.return_line or detected.public_line or 1)
-    if detected and detected.public_name == config.namespace and not record.ignored_lines[line] then
+    -- A FUNCTION shape's `public_name` is the name of a function, not of a
+    -- table anything can be assigned onto, so a file returning `local function
+    -- _P()` is not exporting a namespace whatever it called it.
+    if
+      detected
+      and detected.kind ~= shape.KINDS.FUNCTION
+      and detected.public_name == config.namespace
+      and not models.is_ignored(record, detected.return_line or detected.public_line or 1)
+    then
       offenders[name] = true
       findings[#findings + 1] = {
         module = name,
         path = record.path,
-        line = line,
+        line = detected.return_line or detected.public_line or 1,
         namespace = config.namespace,
         name = config.namespace,
         public_table = _P.public_table_name(detected),
@@ -395,7 +419,7 @@ function _P.symbol_findings(modules, config, context)
         if
           not context.cross[key]
           and not context.external[key]
-          and not record.ignored_lines[symbol.line]
+          and not models.is_ignored(record, symbol.line)
         then
           symbol.test_read = context.test_read[key]
           symbol.test_stub = context.test_stubbed[key]
@@ -408,6 +432,231 @@ function _P.symbol_findings(modules, config, context)
   end
 
   return models.sort_findings(findings)
+end
+
+--- Everything the function-module check needs beyond the modules themselves.
+---@class privata.ModuleReachContext
+---@field scripts privata.Consumer[]    installed scripts, which require but export nothing
+---@field consumers privata.Consumer[]  every file found under the test roots
+---@field test_roots string[]
+
+--- Modules a host can reach without any Lua module requiring them.
+--
+-- The whole-module counterpart of `external_interface`: the same three things
+-- that keep a *symbol* public regardless of the reference graph -- an installed
+-- script, the rock's namesake module, a configured entrypoint -- keep the module
+-- holding them public too.
+---@param project_root string
+---@param config privata.Config
+---@param modules table<string, privata.Module>
+---@return table<string, boolean>  set of module names
+function _P.external_modules(project_root, config, modules)
+  local kept = {}
+
+  local api_modules = rockspec.api_module_names(project_root)
+  for i = 1, #api_modules do
+    if modules[api_modules[i]] then
+      kept[api_modules[i]] = true
+    end
+  end
+
+  local scripts = rockspec.installed_scripts(project_root)
+  for name, record in pairs(modules) do
+    if _P.is_entrypoint_module(name, config.entrypoint_modules or {}) then
+      kept[name] = true
+    end
+    for i = 1, #scripts do
+      if record.path == scripts[i] then
+        kept[name] = true
+      end
+    end
+  end
+
+  return kept
+end
+
+--- Helper modules a test root's own specs require.
+--
+-- The module-level twin of `test_helper_references`, and scoped the same way: a
+-- helper living in a test root exists to serve that suite, so a spec requiring
+-- it is a real use, and attribution stays inside one root so a spec can never
+-- certify production code.
+---@param test_roots string[]
+---@param modules table<string, privata.Module>
+---@param consumers privata.Consumer[]
+---@return table<string, boolean>  set of module names
+function _P.test_helper_module_requires(test_roots, modules, consumers)
+  local used = {}
+
+  for i = 1, #test_roots do
+    local root = test_roots[i]
+    local local_consumers = {}
+    for index = 1, #consumers do
+      if consumers[index].source_root == root then
+        local_consumers[#local_consumers + 1] = consumers[index]
+      end
+    end
+    for name in pairs(requires.module_requires_from(local_consumers)) do
+      local record = modules[name]
+      if record and record.source_root == root then
+        used[name] = true
+      end
+    end
+  end
+
+  return used
+end
+
+--- Every module something other than itself reaches.
+---@param project_root string
+---@param config privata.Config
+---@param modules table<string, privata.Module>
+---@param context privata.ModuleReachContext
+---@return table<string, boolean>  set of module names
+function _P.reachable_modules(project_root, config, modules, context)
+  local consumers = {}
+  for _, record in pairs(modules) do
+    -- A helper in a test root is certified by its own suite below, not by being
+    -- a module: crediting it here would let one unused helper keep another
+    -- alive with no spec involved at all.
+    if not record.is_test_helper then
+      consumers[#consumers + 1] = record
+    end
+  end
+  for i = 1, #context.scripts do
+    consumers[#consumers + 1] = context.scripts[i]
+  end
+
+  local reachable = {}
+  for name in pairs(requires.module_requires_from(consumers)) do
+    reachable[name] = true
+  end
+  for name in pairs(_P.external_modules(project_root, config, modules)) do
+    reachable[name] = true
+  end
+  local helpers = _P.test_helper_module_requires(context.test_roots, modules, context.consumers)
+  for name in pairs(helpers) do
+    reachable[name] = true
+  end
+
+  return reachable
+end
+
+--- The private module name a public one would become, when the convention fits.
+--
+-- `private_module_patterns` holds Lua patterns, and a pattern cannot be
+-- inverted: privata can test a name against one, not build a name from it. So
+-- it proposes the convention -- a leading underscore on the last segment -- and
+-- offers it only when the project's own patterns agree the result is private. A
+-- project that spells privacy some other way gets the general wording instead of
+-- a rename that would not satisfy its own rule.
+---@param module_name string
+---@param patterns string[]
+---@return string|nil
+function _P.private_module_name(module_name, patterns)
+  local prefix, last = module_name:match("^(.*%.)([^.]+)$")
+  local candidate = (prefix or "") .. "_" .. (last or module_name)
+  if requires.is_private_module(candidate, patterns) then
+    return candidate
+  end
+  return nil
+end
+
+--- Modules whose whole export is a function that nothing requires.
+--
+-- A file returning a function publishes no fields, so the symbol check has
+-- nothing to say about it: `local get_foo = require("thing.get_foo");
+-- get_foo(10)` reaches the module without ever indexing it. The require *is* the
+-- interface, so the question the symbol check asks per field is asked here per
+-- module, and a module nothing outside itself requires is public surface that
+-- nobody uses.
+--
+-- Test usage does not certify it, for the same reason it does not certify a
+-- field -- and the remedy survives either way, since a spec is allowed to
+-- require a private module. A module the patterns already mark private is left
+-- alone: there is no publicity left to remove, and privata does not report dead
+-- code.
+---@param modules table<string, privata.Module>
+---@param config privata.Config
+---@param reachable table<string, boolean>  modules something outside themselves reaches
+---@param test_required table<string, privata.Location>  where a spec requires each module
+---@return privata.FunctionModuleFinding[]  sorted by location
+function _P.function_module_findings(modules, config, reachable, test_required)
+  local findings = {}
+
+  for name, record in pairs(modules) do
+    local detected = record.shape
+    if detected and detected.kind == shape.KINDS.FUNCTION and not reachable[name] then
+      local line = detected.public_line or detected.return_line or 1
+      if
+        not requires.is_private_module(name, config.private_module_patterns)
+        and not models.is_ignored(record, line)
+      then
+        findings[#findings + 1] = {
+          module = name,
+          path = record.path,
+          line = line,
+          name = detected.public_name or name:match("[^.]+$") or name,
+          anonymous = detected.public_name == nil,
+          private_module = _P.private_module_name(name, config.private_module_patterns),
+          test_require = test_required[name],
+        }
+      end
+    end
+  end
+
+  return models.sort_findings(findings)
+end
+
+--- `-- privata: ignore` comments that suppressed nothing.
+--
+-- A suppression is a claim that there is a finding here and it is deliberate.
+-- Once the finding is gone -- the symbol was made private, the global got its
+-- `local`, the read moved -- the comment is a claim about nothing, and it will
+-- silently swallow the *next* finding on that line. So privata reports it, the
+-- same way it reports an export table entry that has gone stale.
+--
+-- Two kinds of file are exempt, because an unused ignore in them proves nothing.
+-- A file whose shape privata could not read contributes no symbols at all, and
+-- one that exports its private namespace has its per-field findings suppressed
+-- by privata itself. In both, a comment that suppressed nothing this run may be
+-- load-bearing the moment the larger problem above it is fixed, and privata does
+-- not advise a deletion it would immediately ask to have undone.
+---@param modules table<string, privata.Module>
+---@param namespace_offenders table<string, boolean>  modules reported whole
+---@return privata.StaleIgnoreFinding[]  sorted by location
+function _P.stale_ignore_findings(modules, namespace_offenders)
+  local findings = {}
+
+  for name, record in pairs(modules) do
+    if record.shape and record.shape.kind ~= nil and not namespace_offenders[name] then
+      for line in pairs(record.ignored_lines) do
+        if not record.used_ignores[line] then
+          findings[#findings + 1] = {
+            module = name,
+            path = record.path,
+            line = line,
+            bare = record.bare_ignores[line] or false,
+          }
+        end
+      end
+    end
+  end
+
+  return models.sort_findings(findings)
+end
+
+--- Test files, which certify nothing but are named when a finding is theirs.
+---@param consumers privata.Consumer[]
+---@return privata.Consumer[]
+function _P.test_files(consumers)
+  local out = {}
+  for i = 1, #consumers do
+    if consumers[i].is_test_file then
+      out[#out + 1] = consumers[i]
+    end
+  end
+  return out
 end
 
 --- Run every enabled check against a project.
@@ -440,10 +689,9 @@ function M.run(project_root, config)
 
   -- Installed scripts sit outside every source root but still require modules,
   -- and those requires are real uses.
-  local script_uses = requires.cross_references_from(
-    modules,
+  local script_consumers =
     modules_mod.collect_path_consumers(rockspec.installed_scripts(project_root))
-  )
+  local script_uses = requires.cross_references_from(modules, script_consumers)
   for key in pairs(script_uses) do
     cross[key] = true
   end
@@ -466,58 +714,88 @@ function M.run(project_root, config)
     unanalyzable = unanalyzable,
     collisions = collisions,
     exported_namespaces = {},
+    function_modules = {},
     symbols = {},
     globals = {},
     private_module_requires = {},
     private_symbol_reads = {},
     export_issues = {},
     methods = {},
+    stale_ignores = {},
   }
 
-  -- Computed before the symbol check because it decides which modules that
-  -- check must stay quiet about.
+  -- Every check below *runs*; `checks` decides only which results are kept.
   --
-  -- It runs even when the check is switched off, because `namespace_offenders`
-  -- is what keeps the symbol check quiet about those files. Only the reporting
-  -- is optional; the analysis is not.
+  -- Two of them are load-bearing for the others whatever the config says. The
+  -- exported-namespace check produces `namespace_offenders`, which is what keeps
+  -- the symbol check quiet about those files. And every check records the
+  -- `-- privata: ignore` comments it honoured, which is the only evidence the
+  -- stale-ignore check has: a suppression silenced by a check nobody asked to
+  -- see is still doing its job, and calling it removable would be advice that
+  -- breaks the moment the check is switched back on.
   local exported_namespaces, namespace_offenders =
     _P.exported_namespace_findings(modules, config, cross, test_read)
+
+  local reachable = _P.reachable_modules(project_root, config, modules, {
+    scripts = script_consumers,
+    consumers = consumers,
+    test_roots = test_roots,
+  })
+  local function_modules = _P.function_module_findings(
+    modules,
+    config,
+    reachable,
+    requires.module_requires_from(_P.test_files(consumers))
+  )
+
+  local symbols = _P.symbol_findings(modules, config, {
+    cross = cross,
+    external = external,
+    skip_modules = namespace_offenders,
+    test_read = test_read,
+    test_stubbed = test_stubbed,
+    string_words = string_words,
+  })
+  local globals = _P.global_findings(modules, config, host_reachable)
+  local private_module_requires = models.sort_findings(
+    requires.private_module_requires(
+      modules,
+      config.private_module_patterns,
+      config.package_private
+    )
+  )
+  local private_symbol_reads =
+    models.sort_findings(requires.private_symbol_reads(modules, config.package_private))
+  local export_issues = exports.collect(modules)
+  local methods = require("privata._methods").collect(modules, cross, external)
+
   if config.checks.exported_namespaces then
     findings.exported_namespaces = exported_namespaces
   end
-
+  if config.checks.function_modules then
+    findings.function_modules = function_modules
+  end
   if config.checks.symbols then
-    findings.symbols = _P.symbol_findings(modules, config, {
-      cross = cross,
-      external = external,
-      skip_modules = namespace_offenders,
-      test_read = test_read,
-      test_stubbed = test_stubbed,
-      string_words = string_words,
-    })
+    findings.symbols = symbols
   end
   if config.checks.globals then
-    findings.globals = _P.global_findings(modules, config, host_reachable)
+    findings.globals = globals
   end
   if config.checks.private_modules then
-    findings.private_module_requires = models.sort_findings(
-      requires.private_module_requires(
-        modules,
-        config.private_module_patterns,
-        config.package_private
-      )
-    )
+    findings.private_module_requires = private_module_requires
   end
   if config.checks.private_symbols then
-    findings.private_symbol_reads =
-      models.sort_findings(requires.private_symbol_reads(modules, config.package_private))
+    findings.private_symbol_reads = private_symbol_reads
   end
   if config.checks.exports then
-    findings.export_issues = exports.collect(modules)
+    findings.export_issues = export_issues
   end
   if config.checks.methods then
-    local methods = require("privata._methods")
-    findings.methods = methods.collect(modules, cross, external)
+    findings.methods = methods
+  end
+  -- Last, because it reads what every check above recorded.
+  if config.checks.stale_ignores then
+    findings.stale_ignores = _P.stale_ignore_findings(modules, namespace_offenders)
   end
 
   return findings
@@ -565,6 +843,7 @@ function M.has_failures(findings, config)
 
   local kinds = {
     unanalyzable = findings.unanalyzable,
+    function_modules = findings.function_modules,
     symbols = findings.symbols,
     globals = findings.globals,
     exported_namespaces = findings.exported_namespaces,
@@ -572,6 +851,7 @@ function M.has_failures(findings, config)
     private_symbols = findings.private_symbol_reads,
     exports = findings.export_issues,
     methods = findings.methods,
+    stale_ignores = findings.stale_ignores,
   }
   for kind, list in pairs(kinds) do
     if blocking[kind] and _P.blocking_count(list) > 0 then
@@ -591,11 +871,13 @@ function _P.is_empty(findings)
     and #findings.unanalyzable == 0
     and #findings.symbols == 0
     and #findings.exported_namespaces == 0
+    and #findings.function_modules == 0
     and #findings.globals == 0
     and #findings.private_module_requires == 0
     and #findings.private_symbol_reads == 0
     and #findings.export_issues == 0
     and #findings.methods == 0
+    and #findings.stale_ignores == 0
 end
 
 return M

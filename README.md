@@ -12,6 +12,8 @@ your production Lua modules and reports interface drift:
 - `require`s of a private module from outside the package that owns it
 - reads of another module's private names
 - literal `return { a = a }` tables that have gone stale
+- `-- privata: ignore` comments that no longer suppress anything
+- modules whose whole export is a function that nothing requires
 - public methods on a class that no other module refers to (opt in with `--methods`)
 
 Test usage does not count, so tests can reach internals without pinning them
@@ -111,8 +113,8 @@ return {
 
   fail_on = {                      -- which kinds exit non-zero
     "unparsable", "collisions", "unanalyzable", "symbols", "globals",
-    "exported_namespaces", "private_modules", "private_symbols",
-    "exports", "methods",
+    "exported_namespaces", "function_modules", "private_modules",
+    "private_symbols", "exports", "methods", "stale_ignores",
   },
 
   globals = {},                    -- names that are meant to be global
@@ -124,8 +126,8 @@ return {
 
   checks = {
     symbols = true, globals = true, exported_namespaces = true,
-    private_modules = true, private_symbols = true,
-    exports = true, methods = false,
+    function_modules = true, private_modules = true, private_symbols = true,
+    exports = true, methods = false, stale_ignores = true,
   },
 }
 ```
@@ -266,9 +268,50 @@ local M = {} … return M                      -- classic
 local _P, M = {}, {} … return M              -- two-namespace
 return { foo = foo, bar = bar }              -- literal export table
 local C = {}; C.__index = C … return C       -- class module
+local function run() end … return run        -- function module
+return function(…) … end                     -- the same, unnamed
 return setmetatable(M, mt)                   -- wrapped
 -- and a file with no return at all         -- side-effect module
 ```
+
+A file whose whole export is a function is a **function module**:
+
+```lua
+-- lua/thing/get_foo.lua
+local function get_foo(count)
+  return count + 1
+end
+
+return get_foo
+```
+
+```lua
+local get_foo = require("thing.get_foo")
+get_foo(10)
+```
+
+It publishes no fields — the function *is* the interface, entire — so the symbol
+check has nothing to say about it. What can still be wrong is whether anything
+requires the module at all, so the question the symbol check asks per field is
+asked here per module:
+
+```text
+Found 1 module returning a function that nothing requires:
+
+  lua/thing/orphan.lua:1: returns function `run`, which no other module requires
+      rename the module to `thing._orphan`, or delete it
+```
+
+A require is enough — the result may be called, passed on, or stored. Requires
+from installed scripts, the rock's namesake module, `entrypoint_modules` and
+`require` written inside a string all count, exactly as they do for a symbol.
+Test usage does not, on the same rule as everywhere else; the spec is named in
+the report, and the rename is a change the suite survives, since a spec may
+require a private module.
+
+A module the `private_module_patterns` already mark private is left alone: there
+is no publicity left to remove, and privata reports interface drift rather than
+dead code. Switch the whole check off with `checks = { function_modules = false }`.
 
 A file that returns nothing is a **side-effect module**, not a failure to read.
 Setting autocommands, installing keymaps, registering commands: the file runs
@@ -340,10 +383,38 @@ Two things worth knowing:
 - It is matched against raw source text, so it does not need code on the line to
   be recognised — but a comment on its own line matches no finding, because
   findings are located by the line they occur on.
+- The marker must be the **first thing in the comment**. Anything may follow it,
+  so `-- privata: ignore (the host calls this)` works, but a line that merely
+  mentions the marker in prose is not a directive — documentation about this
+  feature is written in Lua comments too.
 
 Module-name collisions are the one thing it cannot suppress: a collision is a
 fact about two files, so there is no single line to put it on. Use
 `--skip-module-collisions`.
+
+### Ignores that have gone stale
+
+An ignore is a claim that there is a finding here and it is deliberate. Once the
+finding is gone — the symbol was made private, the global got its `local`, the
+read moved — the comment is a claim about nothing, and it will silently swallow
+the *next* finding on that line. privata reports it:
+
+```text
+Found 2 unused `privata: ignore` comments that can be removed:
+
+  lua/pkg/init.lua:3: unused ignore -- nothing on this line is reported
+      the comment is on a line of its own; a finding is reported against the line its code is on
+  lua/pkg/service.lua:7: unused ignore -- nothing on this line is reported
+```
+
+Every check records the comments it honoured, including the checks this run was
+not asked to report. An ignore on a method stays live with `methods` off,
+because it is doing its job the moment the check comes back.
+
+Two kinds of file are exempt, because an unused ignore in them proves nothing: a
+file whose shape privata could not read contributes no symbols at all, and one
+that exports its private namespace has its per-field findings suppressed by
+privata itself. Switch the check off with `checks = { stale_ignores = false }`.
 
 ## The method check
 

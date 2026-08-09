@@ -230,6 +230,51 @@ function _P.exported_namespace_group(out, findings, project_root, blocking)
   end
 end
 
+--- Report modules whose whole export is a function nothing requires.
+--
+-- The unit is the file rather than a field: such a module has no fields, and
+-- the require is what makes it public, so the remedy is a rename of the module.
+-- A spec requiring it is named but does not soften the finding -- test usage
+-- never makes anything public, and a spec may require a private module, so the
+-- rename is a change the suite survives.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.FunctionModuleFinding[]
+---@param project_root string  paths are printed relative to this
+function _P.function_modules(out, findings, project_root)
+  _P.section(
+    out,
+    string.format(
+      "Found %s returning a function that nothing requires:",
+      models.count(#findings, "module")
+    )
+  )
+  for i = 1, #findings do
+    local entry = findings[i]
+    out[#out + 1] = string.format(
+      "  %s:%d: returns %s, which no other module requires",
+      _P.relative(entry.path, project_root),
+      entry.line,
+      entry.anonymous and "a function" or string.format("function `%s`", entry.name)
+    )
+
+    if entry.test_require then
+      out[#out + 1] = INDENT
+        .. string.format(
+          "required at %s:%d, but test usage does not make a module public",
+          _P.relative(entry.test_require.path, project_root),
+          entry.test_require.line
+        )
+    end
+
+    out[#out + 1] = INDENT
+      .. (
+        entry.private_module
+          and string.format("rename the module to `%s`, or delete it", entry.private_module)
+        or "rename the module to one `private_module_patterns` marks private, or delete it"
+      )
+  end
+end
+
 --- Report public symbols nothing outside their module reads.
 --
 -- Each line carries the recommendation, the lines that read the symbol, and any
@@ -484,6 +529,38 @@ function _P.methods(out, findings, project_root)
   end
 end
 
+--- Report `-- privata: ignore` comments that suppressed nothing.
+--
+-- Printed last, because it is the one section that is *good* news about the
+-- code: the finding it was written for is gone. A comment sitting on a line of
+-- its own is called out separately, since that one probably never worked --
+-- findings are reported against the line the code is on.
+---@param out string[]  the report's lines, appended to in place
+---@param findings privata.StaleIgnoreFinding[]
+---@param project_root string  paths are printed relative to this
+function _P.stale_ignores(out, findings, project_root)
+  _P.section(
+    out,
+    string.format(
+      "Found %s that can be removed:",
+      models.count(#findings, "unused `" .. models.IGNORE_COMMENT .. "` comment")
+    )
+  )
+  for i = 1, #findings do
+    local entry = findings[i]
+    out[#out + 1] = string.format(
+      "  %s:%d: unused ignore -- nothing on this line is reported",
+      _P.relative(entry.path, project_root),
+      entry.line
+    )
+    if entry.bare then
+      out[#out + 1] = INDENT
+        .. "the comment is on a line of its own; a finding is reported against "
+        .. "the line its code is on"
+    end
+  end
+end
+
 --- Render findings as text.
 ---@param findings privata.Findings
 ---@param project_root string  paths are printed relative to this
@@ -510,6 +587,9 @@ function M.render(findings, project_root, config)
   if #findings.exported_namespaces > 0 then
     _P.exported_namespaces(out, findings.exported_namespaces, project_root)
   end
+  if #findings.function_modules > 0 then
+    _P.function_modules(out, findings.function_modules, project_root)
+  end
   if #findings.symbols > 0 then
     _P.symbols(out, findings.symbols, project_root)
   end
@@ -524,6 +604,9 @@ function M.render(findings, project_root, config)
   end
   if #findings.export_issues > 0 then
     _P.export_issues(out, findings.export_issues, project_root)
+  end
+  if #findings.stale_ignores > 0 then
+    _P.stale_ignores(out, findings.stale_ignores, project_root)
   end
 
   if #out == 0 then

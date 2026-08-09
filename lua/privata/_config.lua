@@ -55,10 +55,12 @@ function _P.defaults()
       "symbols",
       "globals",
       "exported_namespaces",
+      "function_modules",
       "private_modules",
       "private_symbols",
       "exports",
       "methods",
+      "stale_ignores",
     },
 
     globals = {},
@@ -76,10 +78,12 @@ function _P.defaults()
       symbols = true,
       globals = true,
       exported_namespaces = true,
+      function_modules = true,
       private_modules = true,
       private_symbols = true,
       exports = true,
       methods = false,
+      stale_ignores = true,
     },
   }
 end
@@ -270,10 +274,12 @@ function _P.validate(config)
     symbols = true,
     globals = true,
     exported_namespaces = true,
+    function_modules = true,
     private_modules = true,
     private_symbols = true,
     exports = true,
     methods = true,
+    stale_ignores = true,
   }
   if _P.is_string_list(config.fail_on) then
     for i = 1, #config.fail_on do
