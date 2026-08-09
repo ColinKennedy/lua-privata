@@ -130,6 +130,29 @@ function M.dirname(path)
   return parent
 end
 
+--- True for a path that names a location without needing a starting directory.
+--
+-- The drive-letter branch is for Windows, where `C:/x` is absolute but does not
+-- begin with a separator. A UNC path (`//host/share`) is caught by the first
+-- branch, since it does.
+---@param path string
+---@return boolean
+function _P.is_absolute(path)
+  local normalized = M.normalize(path)
+  return normalized:sub(1, 1) == "/" or normalized:find("^%a:/") ~= nil
+end
+
+--- Resolve `path` against `base`, leaving an already-absolute path alone.
+---@param path string
+---@param base string  the directory a relative `path` is written from
+---@return string  the normalized path; absolute whenever `base` is
+function M.absolute(path, base)
+  if _P.is_absolute(path) then
+    return M.normalize(path)
+  end
+  return M.normalize(M.join(base, path))
+end
+
 --- True when `path` sits inside `root`, or is `root` itself.
 --
 -- Compares whole segments so `lua/spec` is not read as being inside `lua/spe`.

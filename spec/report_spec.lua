@@ -10,8 +10,8 @@ local function render(files, overrides, body)
     local config = assert(config_mod.load(root, overrides))
     local findings = assert(privata.check(root, overrides))
     body(
-      text_report.render(findings, root, config),
-      json_report.render(findings, root, config),
+      text_report.render(findings, project.display(root), config),
+      json_report.render(findings, project.display(root), config),
       findings
     )
   end)

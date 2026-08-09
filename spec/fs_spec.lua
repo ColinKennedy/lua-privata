@@ -46,6 +46,25 @@ describe("fs", function()
     end)
   end)
 
+  describe("absolute", function()
+    it("resolves a relative path against the base", function()
+      assert.equal("/home/x/lua/pkg.lua", fs.absolute("lua/pkg.lua", "/home/x"))
+    end)
+
+    it("leaves an already-absolute path alone", function()
+      assert.equal("/etc/x.lua", fs.absolute("/etc/x.lua", "/home/x"))
+    end)
+
+    it("recognises a windows drive letter as absolute", function()
+      assert.is_true(fs._P.is_absolute("C:/lua/pkg.lua"))
+      assert.equal("C:/lua/pkg.lua", fs.absolute("C:\\lua\\pkg.lua", "/home/x"))
+    end)
+
+    it("normalizes what it resolves", function()
+      assert.equal("/home/lua/pkg.lua", fs.absolute("./../lua/pkg.lua", "/home/x"))
+    end)
+  end)
+
   describe("is_within", function()
     it("compares whole segments", function()
       assert.is_true(fs.is_within("lua/privata", "lua"))

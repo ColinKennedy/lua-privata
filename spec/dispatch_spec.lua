@@ -302,7 +302,7 @@ return M
       ["spec/sidefx_spec.lua"] = 'local s = require("ex.sidefx")\ns.a()',
     }, function(root)
       local settings = assert(config.load(root))
-      local report = text.render(checker.run(root, settings), root, settings)
+      local report = text.render(checker.run(root, settings), project.display(root), settings)
       assert.matches("held by spec/sidefx_spec.lua:2", report, 1, true)
       assert.matches("local M = {}; M._P = _P; return M", report, 1, true)
       assert.is_nil(report:find("return nothing", 1, true))
@@ -317,7 +317,7 @@ return M
       ["lua/ex/sidefx.lua"] = "local _P = {}\nfunction _P.a() end\n_P.a()\nreturn _P",
     }, function(root)
       local settings = assert(config.load(root))
-      local report = text.render(checker.run(root, settings), root, settings)
+      local report = text.render(checker.run(root, settings), project.display(root), settings)
       assert.matches("return nothing", report, 1, true)
     end)
   end)

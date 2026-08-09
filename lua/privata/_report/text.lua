@@ -5,7 +5,6 @@
 -- not be read, every finding below it may be wrong, and a reader has to know
 -- that before acting on any of them.
 
-local fs = require("privata._fs")
 local models = require("privata._models")
 
 local M = {}
@@ -13,14 +12,6 @@ local _P = {}
 
 local INDENT = "      "
 local WIDTH = 94
-
---- Path relative to the project root, or the path itself when it lies outside.
----@param path string
----@param project_root string
----@return string
-function _P.relative(path, project_root)
-  return fs.relative(path, project_root) or path
-end
 
 --- Wrap a comma-joined list so the indented detail lines stay readable.
 ---@param items string[]
@@ -91,9 +82,9 @@ _P.INTERFACE_HINT = {
 -- file still stops contributing references either way.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.UnparsableFinding[]
----@param project_root string  paths are printed relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param config privata.Config
-function _P.unparsable(out, findings, project_root, config)
+function _P.unparsable(out, findings, display, config)
   local verb = config.skip_unparsable_files and "warning" or "error"
   _P.section(
     out,
@@ -106,17 +97,16 @@ function _P.unparsable(out, findings, project_root, config)
   )
   for i = 1, #findings do
     local entry = findings[i]
-    out[#out + 1] =
-      string.format("  %s:%d: %s", _P.relative(entry.path, project_root), entry.line, entry.message)
+    out[#out + 1] = string.format("  %s:%d: %s", display(entry.path), entry.line, entry.message)
   end
 end
 
 --- Report module names claimed by more than one file.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.CollisionFinding[]
----@param project_root string  paths are printed relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param config privata.Config
-function _P.collisions(out, findings, project_root, config)
+function _P.collisions(out, findings, display, config)
   local verb = config.skip_module_collisions and "warning" or "error"
   _P.section(
     out,
@@ -131,7 +121,7 @@ function _P.collisions(out, findings, project_root, config)
     local entry = findings[i]
     local paths = {}
     for index = 1, #entry.paths do
-      paths[index] = _P.relative(entry.paths[index], project_root)
+      paths[index] = display(entry.paths[index])
     end
     out[#out + 1] =
       string.format("  module `%s` is defined by: %s", entry.module, table.concat(paths, ", "))
@@ -141,8 +131,8 @@ end
 --- Report files whose module shape privata declined to guess at.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.UnanalyzableFinding[]
----@param project_root string  paths are printed relative to this
-function _P.unanalyzable(out, findings, project_root)
+---@param display privata.PathDisplay  spells a collected path for the reader
+function _P.unanalyzable(out, findings, display)
   _P.section(
     out,
     string.format(
@@ -152,8 +142,7 @@ function _P.unanalyzable(out, findings, project_root)
   )
   for i = 1, #findings do
     local entry = findings[i]
-    out[#out + 1] =
-      string.format("  %s:%d: %s", _P.relative(entry.path, project_root), entry.line, entry.reason)
+    out[#out + 1] = string.format("  %s:%d: %s", display(entry.path), entry.line, entry.reason)
   end
 end
 
@@ -169,8 +158,8 @@ end
 -- of health, and printing it alongside the blocking ones reads as a queue.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.ExportedNamespaceFinding[]
----@param project_root string  paths are printed relative to this
-function _P.exported_namespaces(out, findings, project_root)
+---@param display privata.PathDisplay  spells a collected path for the reader
+function _P.exported_namespaces(out, findings, display)
   local blocking, advisory = {}, {}
   for i = 1, #findings do
     local bucket = findings[i].advisory and advisory or blocking
@@ -178,19 +167,19 @@ function _P.exported_namespaces(out, findings, project_root)
   end
 
   if #blocking > 0 then
-    _P.exported_namespace_group(out, blocking, project_root, true)
+    _P.exported_namespace_group(out, blocking, display, true)
   end
   if #advisory > 0 then
-    _P.exported_namespace_group(out, advisory, project_root, false)
+    _P.exported_namespace_group(out, advisory, display, false)
   end
 end
 
 --- Print one group of exported-namespace findings, with its own heading.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.ExportedNamespaceFinding[]  all of one severity
----@param project_root string  paths are printed relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param blocking boolean  false for the advisory group, which never fails a run
-function _P.exported_namespace_group(out, findings, project_root, blocking)
+function _P.exported_namespace_group(out, findings, display, blocking)
   _P.section(
     out,
     blocking
@@ -211,7 +200,7 @@ function _P.exported_namespace_group(out, findings, project_root, blocking)
       or string.format("all %d fields on it are public", entry.public_symbols)
     out[#out + 1] = string.format(
       "  %s:%d: returns `%s`, so %s",
-      _P.relative(entry.path, project_root),
+      display(entry.path),
       entry.line,
       entry.namespace,
       surface
@@ -225,7 +214,7 @@ function _P.exported_namespace_group(out, findings, project_root, blocking)
       out[#out + 1] = INDENT
         .. string.format(
           "held by %s:%d, and no production module reads it",
-          _P.relative(entry.test_handle.path, project_root),
+          display(entry.test_handle.path),
           entry.test_handle.line
         )
       out[#out + 1] = INDENT
@@ -267,9 +256,9 @@ end
 -- rename is a change the suite survives.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.FunctionModuleFinding[]
----@param project_root string  paths are printed relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param hint boolean|nil  print the interface hint under this section's heading
-function _P.function_modules(out, findings, project_root, hint)
+function _P.function_modules(out, findings, display, hint)
   _P.section(
     out,
     string.format(
@@ -282,7 +271,7 @@ function _P.function_modules(out, findings, project_root, hint)
     local entry = findings[i]
     out[#out + 1] = string.format(
       "  %s:%d: returns %s, which no other module requires",
-      _P.relative(entry.path, project_root),
+      display(entry.path),
       entry.line,
       entry.anonymous and "a function" or string.format("function `%s`", entry.name)
     )
@@ -291,7 +280,7 @@ function _P.function_modules(out, findings, project_root, hint)
       out[#out + 1] = INDENT
         .. string.format(
           "required at %s:%d, but test usage does not make a module public",
-          _P.relative(entry.test_require.path, project_root),
+          display(entry.test_require.path),
           entry.test_require.line
         )
     end
@@ -311,9 +300,9 @@ end
 -- caveat -- everything needed to act on it without opening the file.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.Symbol[]
----@param project_root string  paths are printed relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param hint boolean|nil  print the interface hint under this section's heading
-function _P.symbols(out, findings, project_root, hint)
+function _P.symbols(out, findings, display, hint)
   _P.section(
     out,
     string.format("Found %s that could be made private:", models.count(#findings, "public symbol")),
@@ -327,7 +316,7 @@ function _P.symbols(out, findings, project_root, hint)
     local recommendation = symbol.recommendation
     out[#out + 1] = string.format(
       "  %s:%d: %s `%s` -> %s",
-      _P.relative(symbol.path, project_root),
+      display(symbol.path),
       symbol.line,
       symbol.kind,
       symbol.path_name,
@@ -371,7 +360,7 @@ function _P.symbols(out, findings, project_root, hint)
       out[#out + 1] = INDENT
         .. string.format(
           "name also appears in a string at %s:%d -- check it is not reached by name",
-          _P.relative(symbol.string_mention.path, project_root),
+          display(symbol.string_mention.path),
           symbol.string_mention.line
         )
     end
@@ -381,8 +370,8 @@ end
 --- Report global bindings.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.GlobalFinding[]
----@param project_root string  paths are printed relative to this
-function _P.globals(out, findings, project_root)
+---@param display privata.PathDisplay  spells a collected path for the reader
+function _P.globals(out, findings, display)
   _P.section(
     out,
     string.format(
@@ -394,7 +383,7 @@ function _P.globals(out, findings, project_root)
     local entry = findings[i]
     out[#out + 1] = string.format(
       "  %s:%d: %s `%s`%s",
-      _P.relative(entry.path, project_root),
+      display(entry.path),
       entry.line,
       entry.kind,
       entry.name,
@@ -409,8 +398,8 @@ end
 --- Report requires of a private module from outside its owning package.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.PrivateModuleRequireFinding[]
----@param project_root string  paths are printed relative to this
-function _P.private_module_requires(out, findings, project_root)
+---@param display privata.PathDisplay  spells a collected path for the reader
+function _P.private_module_requires(out, findings, display)
   _P.section(
     out,
     string.format(
@@ -422,7 +411,7 @@ function _P.private_module_requires(out, findings, project_root)
     local entry = findings[i]
     out[#out + 1] = string.format(
       "  %s:%d: requires private module `%s`",
-      _P.relative(entry.required_by_path, project_root),
+      display(entry.required_by_path),
       entry.line,
       entry.module
     )
@@ -436,9 +425,9 @@ end
 -- fan-out is the interesting number, so it leads.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.PrivateSymbolReadFinding[]
----@param project_root string  paths are printed relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param config privata.Config|nil  consulted only to mention `package_private`
-function _P.private_symbol_reads(out, findings, project_root, config)
+function _P.private_symbol_reads(out, findings, display, config)
   local groups = {}
   local order = {}
   for i = 1, #findings do
@@ -478,11 +467,8 @@ function _P.private_symbol_reads(out, findings, project_root, config)
       string.format("  `%s` -- read by %s", order[i], models.count(#readers, "module"))
     local marks = {}
     for index = 1, #readers do
-      marks[index] = string.format(
-        "%s:%d",
-        _P.relative(readers[index].read_by_path, project_root),
-        readers[index].line
-      )
+      marks[index] =
+        string.format("%s:%d", display(readers[index].read_by_path), readers[index].line)
     end
     local wrapped = _P.wrap(marks, WIDTH - #INDENT)
     for index = 1, #wrapped do
@@ -494,12 +480,12 @@ end
 --- Report stale or private entries in a literal export table.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.ExportIssueFinding[]
----@param project_root string  paths are printed relative to this
-function _P.export_issues(out, findings, project_root)
+---@param display privata.PathDisplay  spells a collected path for the reader
+function _P.export_issues(out, findings, display)
   _P.section(out, string.format("Found %s:", models.count(#findings, "export table issue")))
   for i = 1, #findings do
     local entry = findings[i]
-    local location = string.format("  %s:%d: ", _P.relative(entry.path, project_root), entry.line)
+    local location = string.format("  %s:%d: ", display(entry.path), entry.line)
     if entry.kind == "unknown" then
       out[#out + 1] = location
         .. string.format(
@@ -515,9 +501,9 @@ end
 --- Report public methods nothing refers to, grouped by the class holding them.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.Method[]
----@param project_root string  paths are printed relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param hint boolean|nil  print the interface hint under this section's heading
-function _P.methods(out, findings, project_root, hint)
+function _P.methods(out, findings, display, hint)
   local groups = {}
   local order = {}
   for i = 1, #findings do
@@ -548,7 +534,7 @@ function _P.methods(out, findings, project_root, hint)
     -- wholly internal, and a single method that leaked out of a public one.
     out[#out + 1] = string.format(
       "  %s:%d: class `%s` (%d of %d public methods)",
-      _P.relative(class.path, project_root),
+      display(class.path),
       class.class_line,
       class.class_name,
       #group.items,
@@ -573,8 +559,8 @@ end
 -- findings are reported against the line the code is on.
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.StaleIgnoreFinding[]
----@param project_root string  paths are printed relative to this
-function _P.stale_ignores(out, findings, project_root)
+---@param display privata.PathDisplay  spells a collected path for the reader
+function _P.stale_ignores(out, findings, display)
   _P.section(
     out,
     string.format(
@@ -586,7 +572,7 @@ function _P.stale_ignores(out, findings, project_root)
     local entry = findings[i]
     out[#out + 1] = string.format(
       "  %s:%d: unused ignore -- nothing on this line is reported",
-      _P.relative(entry.path, project_root),
+      display(entry.path),
       entry.line
     )
     if entry.bare then
@@ -599,29 +585,29 @@ end
 
 --- Render findings as text.
 ---@param findings privata.Findings
----@param project_root string  paths are printed relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param config privata.Config
 ---@return string  the whole report, or a single clean-run line
-function M.render(findings, project_root, config)
+function M.render(findings, display, config)
   local out = {}
 
   if #findings.unparsable > 0 then
-    _P.unparsable(out, findings.unparsable, project_root, config)
+    _P.unparsable(out, findings.unparsable, display, config)
   end
   if #findings.collisions > 0 then
-    _P.collisions(out, findings.collisions, project_root, config)
+    _P.collisions(out, findings.collisions, display, config)
   end
   if #findings.unanalyzable > 0 then
-    _P.unanalyzable(out, findings.unanalyzable, project_root)
+    _P.unanalyzable(out, findings.unanalyzable, display)
   end
   -- Defects lead. An accidental global is objectively a bug; everything below
   -- it is a statement about intended surface area, and a reader who has to
   -- scroll past two hundred opinions to reach three real leaks will not.
   if #findings.globals > 0 then
-    _P.globals(out, findings.globals, project_root)
+    _P.globals(out, findings.globals, display)
   end
   if #findings.exported_namespaces > 0 then
-    _P.exported_namespaces(out, findings.exported_namespaces, project_root)
+    _P.exported_namespaces(out, findings.exported_namespaces, display)
   end
   -- Three sections, one shared remedy, printed once -- under whichever of them
   -- the run happens to reach first. Repeating it per section would be three
@@ -629,27 +615,27 @@ function M.render(findings, project_root, config)
   -- the hint is about the codebase rather than about any one finding.
   local hint = true
   if #findings.function_modules > 0 then
-    _P.function_modules(out, findings.function_modules, project_root, hint)
+    _P.function_modules(out, findings.function_modules, display, hint)
     hint = false
   end
   if #findings.symbols > 0 then
-    _P.symbols(out, findings.symbols, project_root, hint)
+    _P.symbols(out, findings.symbols, display, hint)
     hint = false
   end
   if #findings.methods > 0 then
-    _P.methods(out, findings.methods, project_root, hint)
+    _P.methods(out, findings.methods, display, hint)
   end
   if #findings.private_module_requires > 0 then
-    _P.private_module_requires(out, findings.private_module_requires, project_root)
+    _P.private_module_requires(out, findings.private_module_requires, display)
   end
   if #findings.private_symbol_reads > 0 then
-    _P.private_symbol_reads(out, findings.private_symbol_reads, project_root, config)
+    _P.private_symbol_reads(out, findings.private_symbol_reads, display, config)
   end
   if #findings.export_issues > 0 then
-    _P.export_issues(out, findings.export_issues, project_root)
+    _P.export_issues(out, findings.export_issues, display)
   end
   if #findings.stale_ignores > 0 then
-    _P.stale_ignores(out, findings.stale_ignores, project_root)
+    _P.stale_ignores(out, findings.stale_ignores, display)
   end
 
   if #out == 0 then

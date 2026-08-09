@@ -96,6 +96,12 @@ function _P.defaults()
     skip_module_collisions = false,
     format = "text",
 
+    -- How a reported path is spelled, measured from the directory privata ran
+    -- in. Relative by default: a report is usually read beside the checkout
+    -- that produced it, and an absolute path there is a build agent's scratch
+    -- directory in front of every line. See `cli.path_display`.
+    paths = "relative",
+
     checks = {
       symbols = true,
       globals = true,
@@ -117,6 +123,8 @@ _P.PRIVATIZE_STRATEGIES = {
 }
 
 _P.FORMATS = { text = true, json = true }
+
+_P.PATH_STYLES = { relative = true, absolute = true }
 
 _P.LOCAL_FUNCTION_STYLES = { statement = true, assignment = true }
 
@@ -267,6 +275,10 @@ function _P.validate(config)
 
   if not _P.FORMATS[config.format] then
     problems[#problems + 1] = "format must be 'text' or 'json'"
+  end
+
+  if not _P.PATH_STYLES[config.paths] then
+    problems[#problems + 1] = "paths must be 'relative' or 'absolute'"
   end
 
   local FAIL_ON_KINDS = {

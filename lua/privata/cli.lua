@@ -32,6 +32,8 @@ Options:
   --namespace NAME            Private namespace to recommend (default: _P).
   --preset NAME               Apply a shipped preset, e.g. neovim.
   --format text|json          Output format (default: text).
+  --paths relative|absolute   How reported paths are spelled (default: relative,
+                              measured from the directory privata was run in).
   --version                   Print the version and exit.
   -h, --help                  Print this message and exit.
 
@@ -50,6 +52,7 @@ local OPTIONS = {
   ["--namespace"] = "namespace",
   ["--preset"] = "preset",
   ["--format"] = "format",
+  ["--paths"] = "paths",
 }
 
 --- Parse argv into a project root and a config overlay.
@@ -100,6 +103,37 @@ function _P.parse_arguments(argv)
   end
 
   return project_root or ".", overrides
+end
+
+--- Build the function that spells a collected path for the report.
+--
+-- Both styles are anchored to the working directory rather than to the scanned
+-- root, and that is the whole point. `privata lua` scans `lua/`, but the reader
+-- is standing where they ran it, so measuring from the scanned root drops the
+-- one prefix that makes a path openable: `lua/thing/init.lua` would print as
+-- `thing/init.lua`, which names no file an editor or a `cd`-ed shell can find.
+--
+-- `relative` is the default because a report is usually read next to the
+-- checkout that produced it, where the short path is the one a reader can click
+-- and a CI log stays free of a build agent's scratch directory. `absolute`
+-- exists for the report that travels: an editor given a path with no directory
+-- to resolve it against, or a log read somewhere other than where it was made.
+--
+-- Under `relative`, a path outside the working directory is printed as
+-- collected rather than reached for with `..`, which keeps it identifiable
+-- instead of turning it into a spelling nobody can read at a glance.
+---@param style string  "relative" or "absolute"
+---@return privata.PathDisplay
+function _P.path_display(style)
+  local cwd = fs.cwd()
+  if style == "absolute" then
+    return function(path)
+      return fs.absolute(path, cwd)
+    end
+  end
+  return function(path)
+    return fs.relative(path, cwd) or path
+  end
 end
 
 --- Write a line to a stream.
@@ -156,11 +190,12 @@ function M.main(argv, io_streams)
   end
 
   local findings = checker.run(project_root, config)
+  local display = _P.path_display(config.paths)
 
   if config.format == "json" then
-    _P.write(out, json_report.render(findings, project_root, config))
+    _P.write(out, json_report.render(findings, display, config))
   else
-    _P.write(out, text_report.render(findings, project_root, config))
+    _P.write(out, text_report.render(findings, display, config))
   end
 
   if checker.has_failures(findings, config) then

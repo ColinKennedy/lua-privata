@@ -225,6 +225,12 @@ describe("config", function()
       end)
     end)
 
+    it("rejects an invalid path style", function()
+      with_config({}, { paths = "shortest" }, function(_, err)
+        assert.matches("paths must be", err[1])
+      end)
+    end)
+
     it("rejects a malformed private_module_pattern", function()
       with_config(
         {
