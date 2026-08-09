@@ -80,6 +80,9 @@ Options:
   --methods                   Also report public methods no other module refers
                               to. Off by default: Lua dispatch is dynamic, so
                               this check cannot see every caller.
+  --ignore-methods            Never report a `function C:m()` declaration. For a
+                              codebase whose dispatch privata cannot follow at
+                              all; conflicts with --methods.
   --skip-unparsable-files     Downgrade unparsable files from error to warning.
   --skip-module-collisions    Downgrade colliding module names to a warning.
   --namespace NAME            Private namespace to recommend (default: _P).
@@ -129,6 +132,7 @@ return {
   globals = {},                    -- names that are meant to be global
 
   methods = false,
+  ignore_methods = false,          -- never report a `function C:m()` declaration
   skip_unparsable_files = false,
   skip_module_collisions = false,
   format = "text",
@@ -171,6 +175,67 @@ finding is **annotated, never suppressed**:
 
 privata cannot tell that from a coincidence, so it says what it saw and leaves
 the decision to you rather than silently recommending a breaking rename.
+
+### References written as types
+
+A class module is reached through its **instances**, never through its table.
+Nothing anywhere writes `code_item.position` — the caller was handed a value and
+calls `item:position()` on it — so the require graph has no edge to follow, and
+every method on the class looks unread. That is the worst false positive
+available: acting on it moves a method three other files call.
+
+The edge is already written down, in the annotation the caller needed anyway.
+privata reads four LuaCATS tags and joins them:
+
+```lua
+-- lua/pkg/item.lua
+---@class pkg.Item          -- the declaring side: this module owns that type
+local Item = {}
+Item.__index = Item
+function Item:position() end
+return Item
+```
+
+```lua
+-- lua/pkg/report.lua       -- requires nothing from pkg.item, and still calls it
+---@param item pkg.Item     -- a function argument
+---@type pkg.Item           -- the declaration underneath it
+---@cast item pkg.Item      -- a variable re-typed from here on
+```
+
+Both spellings of a read count, because a rename breaks both: `item:position()`
+and `item.line`. The type may be named anywhere inside a type expression —
+`pkg.Item[]`, `pkg.Item|nil`, `table<string, pkg.Item>` all name it — and the
+description after the type is prose, so a class name mentioned only there is not
+a reference.
+
+Three rules bound it, and each is the same rule the reference scan already has:
+
+- only the `---@class` on the **returned** table counts. A file declares an
+  options record and a result shape too, and those are not its interface.
+- a module's own annotations certify nothing about its own methods.
+- an annotation in a spec certifies nothing, exactly as a call from one does.
+
+It follows a **declared** type, never an inferred one. `local x = item` retypes
+nothing privata can see, and neither does `items[1]` or the loop variable in
+`for _, item in ipairs(items)`. A codebase with no annotations gets exactly the
+behaviour it had before this existed.
+
+Where the dispatch is beyond reading at all — methods handed to a host, stored
+in a callback table, reached through a metatable chain assembled at runtime —
+the alternative to an `-- privata: ignore` on every method in the project is to
+take methods out of the check entirely:
+
+```lua
+ignore_methods = true,
+```
+
+A symbol declared `function C:m()` is then never reported. The colon is the whole
+signal: it is the one declaration form that says, in the language itself, that
+the name is called on an instance, so `function C.new()` on the same table is
+still reported. privata refuses to run this alongside the method check rather
+than half-applying either, since one exists to report methods and the other
+exists never to.
 
 ### How privata recommends privatising
 
@@ -431,9 +496,9 @@ Off by default, because Lua method dispatch through metatable chains is *more*
 dynamic than Python attribute access, not less.
 
 A method is reported when no other production module mentions its name — as
-`obj:name()`, as `t.name`, or as a string literal. Matching is by name rather
-than by receiver, so an unrelated `other.run` elsewhere conservatively
-suppresses a report for `Service.run`.
+`obj:name()`, as `t.name`, as a string literal, or through a type-annotated
+instance. Matching is by name rather than by receiver, so an unrelated
+`other.run` elsewhere conservatively suppresses a report for `Service.run`.
 
 A class is skipped when anything links a metatable to it, when it indexes itself
 by a computed name, or when it is reached through `_G` or `load`. Dispatch
@@ -446,8 +511,10 @@ Use `-- privata: ignore`.
 **Dispatch it cannot resolve.** The symbol check has the same blind spot the
 method check documents: a name assembled at runtime (`handlers["run_" .. mode]`),
 reached through `_G[name]`, `vim.fn[name]`, `load()`, or forwarded through `...`
-is invisible. privata resolves the two string shapes it can (above) and
-annotates a third; beyond that, `-- privata: ignore` is the answer.
+is invisible. privata resolves the two string shapes it can (above), follows a
+declared type to the module that owns it, and annotates a third; beyond that,
+`-- privata: ignore` is the answer, or `ignore_methods` where the whole category
+is out of reach.
 
 **Intent that has not been exercised.** privata infers intent from observed
 usage, which holds for an application — every consumer is in-repo — and inverts

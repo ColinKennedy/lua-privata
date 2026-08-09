@@ -74,6 +74,18 @@ local _P = {}
 ---@field implicit? boolean  the `self` a method declaration never wrote
 ---@field vararg? boolean    the `...` parameter
 
+--- One LuaCATS tag, with the line of code it describes.
+--
+-- `attached_line` is the whole reason this is a record rather than a pair: a
+-- `---@type` names no variable, so what it types is decided by the declaration
+-- underneath it and nothing else.
+---@class privata.Annotation
+---@field kind string             "class", "param", "type" or "cast"
+---@field name string|nil         the variable a `param` or a `cast` names
+---@field types string[]          every type name written in the annotation
+---@field line integer            where the comment is written
+---@field attached_line integer|nil  the code line it describes; nil when there is none
+
 --- A file location, as the report prints it.
 ---@class privata.Location
 ---@field path string
@@ -90,6 +102,7 @@ local _P = {}
 ---@field uses integer[]       lines inside the defining module that read it
 ---@field end_line integer     last line of a function value, for recursion checks
 ---@field recommendation privata.Recommendation|nil  filled in by `_recommend` when reported
+---@field is_method boolean       declared `function C:m()`, so `self` is implicit
 ---@field test_read privata.Location|nil       where a spec reads it, if one does
 ---@field test_stub privata.Location|nil       where a spec replaces it, if one does
 ---@field string_mention privata.Location|nil  where its name appears in a string literal
@@ -109,6 +122,7 @@ local _P = {}
 ---@field source_root string
 ---@field package_parts string[]
 ---@field chunk privata.Node|nil  retained AST; every later stage walks this
+---@field annotations privata.Annotation[]|nil  LuaCATS tags read from raw source
 ---@field shape privata.Shape|nil what `_shape` made of the file
 ---@field scope privata.ScopeReport|nil  what `_scope` made of its name bindings
 ---@field symbols privata.Symbol[]
@@ -176,6 +190,7 @@ local _P = {}
 ---@field entrypoint_names string[]        symbol names a host calls, e.g. "setup"
 ---@field entrypoint_modules string[]      module name patterns kept public wholesale
 ---@field methods boolean                  the `--methods` spelling of `checks.methods`
+---@field ignore_methods boolean            never report a `function C:m()` declaration
 ---@field skip_unparsable_files boolean
 ---@field skip_module_collisions boolean
 ---@field format string                    "text" or "json"

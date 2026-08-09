@@ -4,6 +4,7 @@
 -- the order the report prints in, and it leads with the two conditions that
 -- make everything after them untrustworthy.
 
+local annotations = require("privata._annotations")
 local exports = require("privata._exports")
 local models = require("privata._models")
 local modules_mod = require("privata._modules")
@@ -419,6 +420,11 @@ function _P.symbol_findings(modules, config, context)
         if
           not context.cross[key]
           and not context.external[key]
+          -- `ignore_methods` is a standing decision about a whole category, so
+          -- it is asked before the per-line comment: a project that has already
+          -- said "methods are not this check's business" should not have its
+          -- `-- privata: ignore` comments credited for suppressing them.
+          and not (config.ignore_methods and symbol.is_method)
           and not models.is_ignored(record, symbol.line)
         then
           symbol.test_read = context.test_read[key]
@@ -687,6 +693,14 @@ function M.run(project_root, config)
   local consumers = modules_mod.collect_test_consumers(test_roots, project_root)
   local cross = requires.cross_references(modules)
 
+  -- A class is reached through its instances, and an instance carries no
+  -- `require` for the reference scan to resolve. The type annotations already in
+  -- the source say which module the value came from, so they are read as
+  -- references of exactly the same standing as `mod.name`.
+  for key in pairs(annotations.cross_references(modules)) do
+    cross[key] = true
+  end
+
   -- Installed scripts sit outside every source root but still require modules,
   -- and those requires are real uses.
   local script_consumers =
@@ -767,7 +781,17 @@ function M.run(project_root, config)
   local private_symbol_reads =
     models.sort_findings(requires.private_symbol_reads(modules, config.package_private))
   local export_issues = exports.collect(modules)
-  local methods = require("privata._methods").collect(modules, cross, external)
+
+  -- Every other check runs whatever `checks` says, so an `-- privata: ignore`
+  -- silenced by a check nobody asked to see is still recorded as doing its job.
+  -- `ignore_methods` is the one setting that breaks that reasoning: the config
+  -- refuses to have it on alongside the methods check, so this check cannot come
+  -- back later, and running it would only let it credit suppressions that no
+  -- longer suppress anything.
+  local methods = {}
+  if not config.ignore_methods then
+    methods = require("privata._methods").collect(modules, cross, external)
+  end
 
   if config.checks.exported_namespaces then
     findings.exported_namespaces = exported_namespaces

@@ -82,7 +82,13 @@ describe("fs", function()
       for i = 2, #files do
         assert.is_true(files[i - 1] < files[i])
       end
-      assert.equal("lua/privata/_ast.lua", files[1])
+      -- A known member rather than `files[1]`, which pins whichever module
+      -- happens to sort first and breaks on the next one added.
+      local found = false
+      for i = 1, #files do
+        found = found or files[i] == "lua/privata/_ast.lua"
+      end
+      assert.is_true(found)
     end)
 
     it("prunes a directory by name before descending", function()

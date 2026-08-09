@@ -6,6 +6,7 @@
 -- itself a finding, and one it had to read twice to discover that would be a
 -- waste of the only expensive thing this tool does.
 
+local annotations = require("privata._annotations")
 local ast = require("privata._ast")
 local fs = require("privata._fs")
 local lexer = require("privata._lexer")
@@ -23,6 +24,7 @@ local _P = {}
 ---@field line integer
 ---@field kind string          one of `models.KINDS`
 ---@field end_line integer|nil last line of a function value, where there is one
+---@field is_method boolean|nil  declared `function C:m()`, with the implicit `self`
 ---@field value privata.Node|nil the assigned expression, on literal-table fields
 
 --- Line numbers carrying a `-- privata: ignore` comment.
@@ -133,7 +135,8 @@ function _P.fields_assigned(chunk, holder)
   ---@param line integer
   ---@param kind string
   ---@param value privata.Node|nil   the assigned expression, for its `end_line`
-  local function record(name, line, kind, value)
+  ---@param is_method boolean|nil    written with `:`, so `self` was implicit
+  local function record(name, line, kind, value, is_method)
     if name == nil or found[name] then
       return
     end
@@ -142,6 +145,7 @@ function _P.fields_assigned(chunk, holder)
       line = line,
       kind = kind,
       end_line = value and value.kind == "FunctionExpr" and value.end_line or line,
+      is_method = is_method or false,
     }
     order[#order + 1] = found[name]
   end
@@ -149,7 +153,11 @@ function _P.fields_assigned(chunk, holder)
   ast.walk(chunk, function(node)
     if node.kind == "FunctionDeclaration" then
       local name, line = _P.field_on(node.target, holder)
-      record(name, line or node.line, models.KINDS.FUNCTION, node.func)
+      -- `function C:m()` is the one declaration form that says, in the language
+      -- itself, "this is called on an instance". `ignore_methods` is the only
+      -- reader of that fact, and it is recorded here rather than re-derived so
+      -- the answer cannot drift from what the parser saw.
+      record(name, line or node.line, models.KINDS.FUNCTION, node.func, node.is_method)
     elseif node.kind == "Assignment" then
       for i = 1, #node.targets do
         local name, line = _P.field_on(node.targets[i], holder)
@@ -255,6 +263,7 @@ function _P.extract_symbols(module_record)
       module = module_record.name,
       path = module_record.path,
       uses = reads and reads[entry.name] or {},
+      is_method = entry.is_method or false,
     }
   end
 
@@ -356,6 +365,7 @@ function _P.load_module(path, root, module_name, config)
     source_root = root,
     package_parts = source_roots.package_parts(module_name),
     chunk = chunk,
+    annotations = annotations.scan(source),
     ignored_lines = ignored,
     bare_ignores = bare,
     used_ignores = {},
