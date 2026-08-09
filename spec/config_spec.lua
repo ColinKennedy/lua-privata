@@ -28,6 +28,10 @@ describe("config", function()
       assert.is_false(config._P.defaults().checks.methods)
     end)
 
+    it("leaves methods reportable as ordinary symbols", function()
+      assert.is_false(config._P.defaults().ignore_methods)
+    end)
+
     it("leaves both unreliable-scan overrides off", function()
       assert.is_false(config._P.defaults().skip_unparsable_files)
       assert.is_false(config._P.defaults().skip_module_collisions)
@@ -160,6 +164,23 @@ describe("config", function()
   end)
 
   describe("validation", function()
+    it("rejects ignoring methods while checking them", function()
+      -- One says report every method with no cross-module caller, the other says
+      -- never report a method. Half-applying either would run a scan neither
+      -- setting asked for.
+      with_config({}, { ignore_methods = true, methods = true }, function(loaded, err)
+        assert.is_nil(loaded)
+        assert.matches("ignore_methods", err[1])
+      end)
+    end)
+
+    it("accepts ignoring methods on its own", function()
+      with_config({ [".privata.lua"] = "return { ignore_methods = true }" }, nil, function(loaded)
+        assert.is_true(loaded.ignore_methods)
+        assert.is_false(loaded.checks.methods)
+      end)
+    end)
+
     it("rejects an unknown privatize strategy", function()
       with_config({ [".privata.lua"] = "return { privatize = { 'nope' } }" }, nil, function(_, err)
         assert.matches("unknown privatize strategy", err[1])

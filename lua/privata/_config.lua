@@ -70,6 +70,15 @@ function _P.defaults()
     entrypoint_modules = {},
 
     methods = false,
+
+    -- Never report a symbol declared `function C:m()`. Off by default, because
+    -- a method is public surface like any other name and the annotation-aware
+    -- reference scan can usually see who calls it. It exists for the codebase
+    -- where it cannot -- methods handed to a host, stored in a callback table,
+    -- reached through a metatable chain assembled at runtime -- where the
+    -- alternative is an `-- privata: ignore` on every method in the project.
+    ignore_methods = false,
+
     skip_unparsable_files = false,
     skip_module_collisions = false,
     format = "text",
@@ -291,6 +300,14 @@ function _P.validate(config)
 
   if type(config.max_locals) ~= "number" or config.max_locals < 1 then
     problems[#problems + 1] = "max_locals must be a positive number"
+  end
+
+  -- Half-applying these would be the worst outcome: the methods check exists to
+  -- report methods and `ignore_methods` exists to never report one, so whichever
+  -- privata picked, the run would differ from what one of the two settings asked
+  -- for without saying so.
+  if config.ignore_methods and config.checks and config.checks.methods then
+    problems[#problems + 1] = "ignore_methods and the methods check cannot both be on"
   end
 
   local defaults = _P.defaults()

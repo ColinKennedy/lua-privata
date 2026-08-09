@@ -541,6 +541,71 @@ return _P
     end)
   end)
 
+  describe("ignore_methods", function()
+    it("never reports a method declared with a colon", function()
+      scan({
+        ["lua/pkg/point.lua"] = [[
+          local C = {}
+          C.__index = C
+          function C:scale() return 1 end
+          return C
+        ]],
+      }, { ignore_methods = true }, function(findings)
+        assert.same({}, names(findings.symbols))
+      end)
+    end)
+
+    it("still reports a plain function on the same table", function()
+      -- The colon is the whole signal: it is the one declaration form that says
+      -- in the language itself that the name is called on an instance.
+      scan({
+        ["lua/pkg/point.lua"] = [[
+          local C = {}
+          C.__index = C
+          function C.new() return setmetatable({}, C) end
+          function C:scale() return 1 end
+          return C
+        ]],
+      }, { ignore_methods = true }, function(findings)
+        assert.same({ "new" }, names(findings.symbols))
+      end)
+    end)
+
+    it("reports the method again when the setting is off", function()
+      scan(
+        {
+          ["lua/pkg/point.lua"] = [[
+          local C = {}
+          C.__index = C
+          function C:scale() return 1 end
+          return C
+        ]],
+        },
+        nil,
+        function(findings)
+          assert.same({ "scale" }, names(findings.symbols))
+        end
+      )
+    end)
+
+    it("does not credit an ignore comment it never needed", function()
+      -- A suppression the setting made redundant is a claim about nothing, and
+      -- reporting it is what stops it silently swallowing the next finding.
+      scan({
+        ["lua/pkg/point.lua"] = [[
+          local C = {}
+          C.__index = C
+          function C:scale() return 1 end -- privata: ignore
+          return C
+        ]],
+      }, { ignore_methods = true }, function(findings)
+        assert.same({}, names(findings.symbols))
+        assert.equal(1, #findings.stale_ignores)
+        assert.equal(3, findings.stale_ignores[1].line)
+      end)
+    end)
+  end)
+
   describe("check toggles", function()
     it("skips a disabled check entirely", function()
       scan({

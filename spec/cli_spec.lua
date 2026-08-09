@@ -49,6 +49,11 @@ describe("cli", function()
       assert.is_true(overrides.skip_module_collisions)
     end)
 
+    it("reads --ignore-methods", function()
+      local _, overrides = cli._P.parse_arguments({ "--ignore-methods" })
+      assert.is_true(overrides.ignore_methods)
+    end)
+
     it("accepts both spellings of unparsable", function()
       local _, a = cli._P.parse_arguments({ "--skip-unparsable-files" })
       local _, b = cli._P.parse_arguments({ "--skip-unparseable-files" })

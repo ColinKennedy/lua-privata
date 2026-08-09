@@ -22,6 +22,9 @@ Options:
   --methods                   Also report public methods no other module refers
                               to. Off by default: Lua dispatch is dynamic, so
                               this check cannot see every caller.
+  --ignore-methods            Never report a `function C:m()` declaration. For a
+                              codebase whose dispatch privata cannot follow at
+                              all; conflicts with --methods.
   --skip-unparsable-files     Downgrade unparsable files from error to warning.
   --skip-module-collisions    Downgrade colliding module names to a warning.
                               Separate from the flag above on purpose: a
@@ -36,6 +39,7 @@ Exit codes: 0 clean, 1 findings, 2 bad usage or configuration.]]
 
 local FLAGS = {
   ["--methods"] = { key = "methods", value = true },
+  ["--ignore-methods"] = { key = "ignore_methods", value = true },
   ["--skip-unparsable-files"] = { key = "skip_unparsable_files", value = true },
   -- Both spellings are in common use; rejecting one would be a papercut.
   ["--skip-unparseable-files"] = { key = "skip_unparsable_files", value = true },
