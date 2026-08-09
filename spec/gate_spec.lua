@@ -147,7 +147,11 @@ describe("report ordering", function()
     -- An accidental global is a bug; a privatisable symbol is a preference.
     project.with(DIRTY, function(root)
       local config = assert(config_mod.load(root))
-      local text = require("privata._report.text").render(checker.run(root, config), root, config)
+      local text = require("privata._report.text").render(
+        checker.run(root, config),
+        project.display(root),
+        config
+      )
       assert.is_true(text:find("global binding") < text:find("could be made private"))
     end)
   end)
@@ -158,7 +162,11 @@ describe("report ordering", function()
         .. "function M.b() end\nfunction M.c() end\nreturn M",
     }, function(root)
       local config = assert(config_mod.load(root))
-      local text = require("privata._report.text").render(checker.run(root, config), root, config)
+      local text = require("privata._report.text").render(
+        checker.run(root, config),
+        project.display(root),
+        config
+      )
       local hints = select(2, text:gsub("add `local _P = {}`", ""))
       assert.equal(1, hints)
     end)

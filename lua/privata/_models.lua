@@ -193,7 +193,15 @@ local _P = {}
 ---@field skip_unparsable_files boolean
 ---@field skip_module_collisions boolean
 ---@field format string                    "text" or "json"
+---@field paths string                     "relative" or "absolute"
 ---@field checks table<string, boolean>    which checks report at all
+
+--- Spells a collected path the way the report should print it.
+--
+-- Handed to the reporters rather than a root to measure against, because the
+-- two path styles are not two roots: `absolute` resolves a path outwards while
+-- `relative` trims one down. See `cli.path_display`.
+---@alias privata.PathDisplay fun(path: string): string
 
 --- One `[[interfaces]]` entry, spelled exactly as `tach.toml` spells it.
 --

@@ -49,6 +49,20 @@ function _P.remove(root)
   end
 end
 
+--- A `privata.PathDisplay` that spells paths relative to `root`.
+--
+-- The CLI measures from the working directory, which a spec cannot move into a
+-- throwaway project. Measuring from the project root instead is the same
+-- reading -- what a reader standing at the top of the scanned tree would see --
+-- and it keeps assertions written as the short paths the fixtures declare.
+---@param root string
+---@return privata.PathDisplay
+function M.display(root)
+  return function(path)
+    return fs.relative(path, root) or path
+  end
+end
+
 --- Run `body(root)` against a temporary project and always clean up after it.
 function M.with(files, body)
   local root = _P.write(files)

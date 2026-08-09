@@ -3,8 +3,6 @@
 -- Hand-rolled encoder: privata has no runtime dependencies, and the shapes
 -- emitted here are its own, so there is nothing to gain from a general one.
 
-local fs = require("privata._fs")
-
 local M = {}
 local _P = {}
 
@@ -85,25 +83,13 @@ function _P.encode(value)
   return "{" .. table.concat(parts, ",") .. "}"
 end
 
---- Path relative to the project root, or the path itself when it lies outside.
---
--- Relative paths keep a report portable between a developer's checkout and a
--- CI workspace; falling back to the absolute path keeps a file outside the root
--- identifiable rather than silently mangled.
----@param path string
----@param project_root string
----@return string
-function _P.relative(path, project_root)
-  return fs.relative(path, project_root) or path
-end
-
 --- Shape one symbol finding, with its recommendation when it has one.
 ---@param entry privata.Symbol
----@param project_root string
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@return table<string, any>  the JSON object for this symbol
-function _P.symbol(entry, project_root)
+function _P.symbol(entry, display)
   local out = {
-    file = _P.relative(entry.path, project_root),
+    file = display(entry.path),
     line = entry.line,
     module = entry.module,
     name = entry.name,
@@ -137,18 +123,18 @@ end
 
 --- Render findings as a single JSON object.
 ---@param findings privata.Findings
----@param project_root string  paths are emitted relative to this
+---@param display privata.PathDisplay  spells a collected path for the reader
 ---@param config privata.Config  supplies the `downgraded` flags
 ---@return string  one JSON object, with sorted keys
-function M.render(findings, project_root, config)
+function M.render(findings, display, config)
   local document = {
     version = 1,
     roots = _P.map(findings.roots, function(root)
-      return _P.relative(root, project_root)
+      return display(root)
     end),
     unparsable = _P.map(findings.unparsable, function(entry)
       return {
-        file = _P.relative(entry.path, project_root),
+        file = display(entry.path),
         line = entry.line,
         module = entry.module,
         message = entry.message,
@@ -159,14 +145,14 @@ function M.render(findings, project_root, config)
       return {
         module = entry.module,
         files = _P.map(entry.paths, function(path)
-          return _P.relative(path, project_root)
+          return display(path)
         end),
         downgraded = config.skip_module_collisions,
       }
     end),
     unanalyzable = _P.map(findings.unanalyzable, function(entry)
       return {
-        file = _P.relative(entry.path, project_root),
+        file = display(entry.path),
         line = entry.line,
         module = entry.module,
         reason = entry.reason,
@@ -174,7 +160,7 @@ function M.render(findings, project_root, config)
     end),
     exported_namespaces = _P.map(findings.exported_namespaces, function(entry)
       return {
-        file = _P.relative(entry.path, project_root),
+        file = display(entry.path),
         line = entry.line,
         module = entry.module,
         namespace = entry.namespace,
@@ -184,7 +170,7 @@ function M.render(findings, project_root, config)
     end),
     function_modules = _P.map(findings.function_modules, function(entry)
       return {
-        file = _P.relative(entry.path, project_root),
+        file = display(entry.path),
         line = entry.line,
         module = entry.module,
         name = entry.name,
@@ -193,11 +179,11 @@ function M.render(findings, project_root, config)
       }
     end),
     symbols = _P.map(findings.symbols, function(entry)
-      return _P.symbol(entry, project_root)
+      return _P.symbol(entry, display)
     end),
     globals = _P.map(findings.globals, function(entry)
       return {
-        file = _P.relative(entry.path, project_root),
+        file = display(entry.path),
         line = entry.line,
         module = entry.module,
         name = entry.name,
@@ -206,7 +192,7 @@ function M.render(findings, project_root, config)
     end),
     private_module_requires = _P.map(findings.private_module_requires, function(entry)
       return {
-        file = _P.relative(entry.required_by_path, project_root),
+        file = display(entry.required_by_path),
         line = entry.line,
         module = entry.module,
         required_by = entry.required_by,
@@ -214,7 +200,7 @@ function M.render(findings, project_root, config)
     end),
     private_symbol_reads = _P.map(findings.private_symbol_reads, function(entry)
       return {
-        file = _P.relative(entry.read_by_path, project_root),
+        file = display(entry.read_by_path),
         line = entry.line,
         module = entry.module,
         name = entry.name,
@@ -223,7 +209,7 @@ function M.render(findings, project_root, config)
     end),
     export_issues = _P.map(findings.export_issues, function(entry)
       return {
-        file = _P.relative(entry.path, project_root),
+        file = display(entry.path),
         line = entry.line,
         module = entry.module,
         name = entry.name,
@@ -233,7 +219,7 @@ function M.render(findings, project_root, config)
     end),
     stale_ignores = _P.map(findings.stale_ignores, function(entry)
       return {
-        file = _P.relative(entry.path, project_root),
+        file = display(entry.path),
         line = entry.line,
         module = entry.module,
         bare = entry.bare,
@@ -241,7 +227,7 @@ function M.render(findings, project_root, config)
     end),
     methods = _P.map(findings.methods, function(entry)
       return {
-        file = _P.relative(entry.path, project_root),
+        file = display(entry.path),
         line = entry.line,
         module = entry.module,
         name = entry.name,

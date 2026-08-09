@@ -212,4 +212,42 @@ describe("cli", function()
       end)
     end)
   end)
+
+  describe("reported paths", function()
+    local fs = require("privata._fs")
+
+    it("keeps the scanned root in the path rather than measuring from it", function()
+      -- The regression: `privata lua` printed `pkg/init.lua`, a path naming no
+      -- file, because it measured from the directory it was told to scan. The
+      -- reader is standing where they ran it, one level above that.
+      local display = cli._P.path_display("relative")
+      assert.equal("lua/pkg/init.lua", display(fs.join(fs.cwd(), "lua/pkg/init.lua")))
+    end)
+
+    it("leaves a path outside the working directory as collected", function()
+      local display = cli._P.path_display("relative")
+      assert.equal("/elsewhere/pkg/init.lua", display("/elsewhere/pkg/init.lua"))
+    end)
+
+    it("resolves against the working directory when asked for absolute", function()
+      local display = cli._P.path_display("absolute")
+      assert.equal(fs.join(fs.cwd(), "lua/pkg/init.lua"), display("lua/pkg/init.lua"))
+    end)
+
+    it("prints whole paths under --paths absolute", function()
+      run({ ["lua/pkg/init.lua"] = "local M = {}\nfunction M.h() end\nreturn M" }, {
+        "--paths",
+        "absolute",
+      }, function(_, out, _, root)
+        assert.matches(root .. "/lua/pkg/init.lua:2", out, 1, true)
+      end)
+    end)
+
+    it("returns 2 for an unknown path style", function()
+      run(CLEAN, { "--paths", "shortest" }, function(code, _, err)
+        assert.equal(2, code)
+        assert.matches("paths must be", err)
+      end)
+    end)
+  end)
 end)

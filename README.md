@@ -90,9 +90,17 @@ Options:
   --namespace NAME            Private namespace to recommend (default: _P).
   --preset NAME               Apply a shipped preset, e.g. neovim.
   --format text|json          Output format (default: text).
+  --paths relative|absolute   How reported paths are spelled (default: relative,
+                              measured from the directory privata was run in).
 ```
 
 Exit codes: `0` clean, `1` findings, `2` bad usage or configuration.
+
+Reported paths are written from the directory you ran privata in, not from the
+root you pointed it at: `privata lua` reports `lua/pkg/init.lua`, which is a
+path you can open. A file outside that directory is reported as privata found
+it. Use `--paths absolute` when the report is read somewhere other than where
+it was produced.
 
 ### Where privata looks
 
@@ -141,6 +149,7 @@ return {
   skip_unparsable_files = false,
   skip_module_collisions = false,
   format = "text",
+  paths = "relative",              -- or "absolute"; measured from where you ran
 
   checks = {
     symbols = true, globals = true, exported_namespaces = true,
