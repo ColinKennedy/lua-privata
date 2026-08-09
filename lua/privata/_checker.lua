@@ -6,6 +6,7 @@
 
 local annotations = require("privata._annotations")
 local exports = require("privata._exports")
+local interfaces = require("privata._interfaces")
 local models = require("privata._models")
 local modules_mod = require("privata._modules")
 local recommend = require("privata._recommend")
@@ -36,10 +37,10 @@ local _P = {}
 -- `require` privata can see. Treating them as unused would report the one
 -- symbol in the project that definitely is used.
 ---@param project_root string
----@param config privata.Config
 ---@param modules table<string, privata.Module>
+---@param surface privata.Surface  the project's declared `interfaces`
 ---@return table<string, boolean>  set keyed `"module\0name"`
-function _P.external_interface(project_root, config, modules)
+function _P.external_interface(project_root, modules, surface)
   local kept = {}
 
   -- Whole-module publicity: the host can reach any name the module exports.
@@ -70,41 +71,22 @@ function _P.external_interface(project_root, config, modules)
     end
   end
 
-  for i = 1, #(config.entrypoint_names or {}) do
-    local entry_name = config.entrypoint_names[i]
-    for name, record in pairs(modules) do
-      for index = 1, #record.symbols do
-        if record.symbols[index].name == entry_name then
-          kept[name .. "\0" .. entry_name] = true
-        end
+  -- A declared interface is the same statement as the two above -- "this is
+  -- reached from somewhere the reference scan cannot see" -- made by the
+  -- project rather than inferred from its packaging. One entry covers both
+  -- shapes it used to take: `{ expose = { "setup" } }` names a symbol wherever
+  -- it is defined, and `{ expose = { ".*" }, from = { "mylib" } }` names every
+  -- symbol of one module.
+  for name, record in pairs(modules) do
+    for index = 1, #record.symbols do
+      local symbol = record.symbols[index]
+      if interfaces.exposes(surface, name, symbol.name) then
+        kept[name .. "\0" .. symbol.name] = true
       end
     end
   end
 
-  for name, record in pairs(modules) do
-    if _P.is_entrypoint_module(name, config.entrypoint_modules or {}) then
-      keep_all(record, name)
-    end
-  end
-
   return kept
-end
-
---- True when a module name matches one of the configured entrypoint patterns.
---
--- `*` stands for any run of characters and everything else is literal, so
--- `*.health` reads as a glob rather than as a Lua pattern nobody wrote.
----@param module_name string
----@param patterns string[]  from `entrypoint_modules`
----@return boolean
-function _P.is_entrypoint_module(module_name, patterns)
-  for i = 1, #patterns do
-    local pattern = "^" .. patterns[i]:gsub("%.", "%%."):gsub("%*", ".*") .. "$"
-    if module_name:find(pattern) then
-      return true
-    end
-  end
-  return false
 end
 
 --- Names that co-located test files certify for helper modules in a test root.
@@ -146,18 +128,19 @@ end
 
 --- Names handed to a host as `require'mod'.name` inside a string literal.
 --
--- These are entry points, not cross-module reads, and the difference decides
--- whether they are seen at all. The string is almost always written *in the
--- module it names* -- `vim.wo.foldexpr = "v:lua.require'this.module'.foldexpr()"`
--- sits beside the function it points at -- so the cross-reference rule, which
--- correctly ignores a module reading itself, would drop every one of them.
+-- These are reached from outside the module graph, not across it, and the
+-- difference decides whether they are seen at all. The string is almost always
+-- written *in the module it names* --
+-- `vim.wo.foldexpr = "v:lua.require'this.module'.foldexpr()"` sits beside the
+-- function it points at -- so the cross-reference rule, which correctly ignores
+-- a module reading itself, would drop every one of them.
 --
 -- What makes it public is not that another Lua module reads it; it is that
 -- something outside the Lua module graph resolves the name through `require` at
 -- evaluation time. That is the same category as a rockspec's installed script.
 ---@param modules table<string, privata.Module>
 ---@return table<string, boolean>  set keyed `"module\0name"`
-function _P.string_entrypoints(modules)
+function _P.host_reachable_symbols(modules)
   local kept = {}
   for _, record in pairs(modules) do
     if record.chunk then
@@ -445,18 +428,19 @@ end
 ---@field scripts privata.Consumer[]    installed scripts, which require but export nothing
 ---@field consumers privata.Consumer[]  every file found under the test roots
 ---@field test_roots string[]
+---@field surface privata.Surface       the project's declared `interfaces`
 
 --- Modules a host can reach without any Lua module requiring them.
 --
 -- The whole-module counterpart of `external_interface`: the same three things
 -- that keep a *symbol* public regardless of the reference graph -- an installed
--- script, the rock's namesake module, a configured entrypoint -- keep the module
+-- script, the rock's namesake module, a declared interface -- keep the module
 -- holding them public too.
 ---@param project_root string
----@param config privata.Config
 ---@param modules table<string, privata.Module>
+---@param surface privata.Surface  the project's declared `interfaces`
 ---@return table<string, boolean>  set of module names
-function _P.external_modules(project_root, config, modules)
+function _P.external_modules(project_root, modules, surface)
   local kept = {}
 
   local api_modules = rockspec.api_module_names(project_root)
@@ -468,7 +452,12 @@ function _P.external_modules(project_root, config, modules)
 
   local scripts = rockspec.installed_scripts(project_root)
   for name, record in pairs(modules) do
-    if _P.is_entrypoint_module(name, config.entrypoint_modules or {}) then
+    -- A file whose whole export is a function publishes exactly one name, so
+    -- that name is what an interface has to expose to keep it public. It is the
+    -- same question the symbol loop above asks, asked of the only symbol there
+    -- is: `{ expose = { ".*" }, from = { "health" } }` covers it, and an
+    -- interface naming some other symbol correctly does not.
+    if interfaces.exposes(surface, name, _P.exported_name(name, record)) then
       kept[name] = true
     end
     for i = 1, #scripts do
@@ -479,6 +468,18 @@ function _P.external_modules(project_root, config, modules)
   end
 
   return kept
+end
+
+--- The single name a function module publishes.
+--
+-- The same fallback the function-module finding prints, so what an interface is
+-- matched against is what the report tells the user their module is called.
+---@param module_name string
+---@param record privata.Module
+---@return string
+function _P.exported_name(module_name, record)
+  local detected = record.shape
+  return (detected and detected.public_name) or module_name:match("[^.]+$") or module_name
 end
 
 --- Helper modules a test root's own specs require.
@@ -515,11 +516,10 @@ end
 
 --- Every module something other than itself reaches.
 ---@param project_root string
----@param config privata.Config
 ---@param modules table<string, privata.Module>
 ---@param context privata.ModuleReachContext
 ---@return table<string, boolean>  set of module names
-function _P.reachable_modules(project_root, config, modules, context)
+function _P.reachable_modules(project_root, modules, context)
   local consumers = {}
   for _, record in pairs(modules) do
     -- A helper in a test root is certified by its own suite below, not by being
@@ -537,7 +537,7 @@ function _P.reachable_modules(project_root, config, modules, context)
   for name in pairs(requires.module_requires_from(consumers)) do
     reachable[name] = true
   end
-  for name in pairs(_P.external_modules(project_root, config, modules)) do
+  for name in pairs(_P.external_modules(project_root, modules, context.surface)) do
     reachable[name] = true
   end
   local helpers = _P.test_helper_module_requires(context.test_roots, modules, context.consumers)
@@ -714,8 +714,9 @@ function M.run(project_root, config)
     cross[key] = true
   end
 
-  local external = _P.external_interface(project_root, config, modules)
-  for key in pairs(_P.string_entrypoints(modules)) do
+  local surface = interfaces.compile(config)
+  local external = _P.external_interface(project_root, modules, surface)
+  for key in pairs(_P.host_reachable_symbols(modules)) do
     external[key] = true
   end
   local test_read, test_stubbed = _P.test_usage(consumers, modules)
@@ -750,10 +751,11 @@ function M.run(project_root, config)
   local exported_namespaces, namespace_offenders =
     _P.exported_namespace_findings(modules, config, cross, test_read)
 
-  local reachable = _P.reachable_modules(project_root, config, modules, {
+  local reachable = _P.reachable_modules(project_root, modules, {
     scripts = script_consumers,
     consumers = consumers,
     test_roots = test_roots,
+    surface = surface,
   })
   local function_modules = _P.function_module_findings(
     modules,
@@ -820,6 +822,54 @@ function M.run(project_root, config)
   -- Last, because it reads what every check above recorded.
   if config.checks.stale_ignores then
     findings.stale_ignores = _P.stale_ignore_findings(modules, namespace_offenders)
+  end
+
+  return _P.drop_unchecked(findings, surface)
+end
+
+--- Which field of a finding names the file the finding is reported against.
+--
+-- For most kinds that is `module`, the module the finding is about. The two
+-- read-across-a-boundary kinds are the exception: the module they name is the
+-- one whose privacy was breached, while the line printed, and the file that has
+-- to change, belong to the reader. `unchecked` is a statement about a file, so
+-- it has to be applied to the file each finding would send someone to edit.
+_P.FINDING_OWNER = {
+  private_module_requires = "required_by",
+  private_symbol_reads = "read_by",
+}
+
+--- Drop every finding located inside a module the config declares `unchecked`.
+--
+-- Applied here rather than inside each check, for two reasons. An unchecked
+-- module is still parsed, and the references it makes still certify names in the
+-- modules it requires -- dropping it from the scan outright would turn its
+-- callees into findings that are not real, which is the failure privata reports
+-- unparsable files to avoid. And one filter over the finished findings cannot
+-- drift from itself the way a dozen guards in a dozen loops can.
+--
+-- Collisions are the one kind left alone: a collision is a fact about two files
+-- claiming one name, so privata has read one of them in place of the other, and
+-- everything reported about that name is suspect whoever declared what.
+---@param findings privata.Findings
+---@param surface privata.Surface
+---@return privata.Findings  the same table, with the unchecked entries gone
+function _P.drop_unchecked(findings, surface)
+  if #surface.modules == 0 then
+    return findings
+  end
+
+  for kind, list in pairs(findings) do
+    if kind ~= "roots" and kind ~= "collisions" then
+      local owner = _P.FINDING_OWNER[kind] or "module"
+      local kept = {}
+      for i = 1, #list do
+        if not interfaces.is_unchecked(surface, tostring(list[i][owner])) then
+          kept[#kept + 1] = list[i]
+        end
+      end
+      findings[kind] = kept
+    end
   end
 
   return findings

@@ -12,6 +12,7 @@ local fs = require("privata._fs")
 local lexer = require("privata._lexer")
 local models = require("privata._models")
 local parser = require("privata._parser")
+local patterns = require("privata._patterns")
 local scope = require("privata._scope")
 local shape = require("privata._shape")
 local source_roots = require("privata._source_roots")
@@ -391,16 +392,56 @@ end
 -- Matched against the project root rather than the source root, because that is
 -- where a user writing `lua/pkg/generated` is counting from -- and a scan can
 -- have several source roots, so a source-root-relative rule would be ambiguous.
+--
+-- An entry holding a glob character is matched as a glob, which is what tach
+-- means by the same key: `**/tests` names a directory wherever it sits rather
+-- than one directory called `**`. Matching is against the entry and every
+-- directory above the file, so a pattern naming a directory excludes what is
+-- inside it -- tach's rule that an exclude matches from the start of the path.
 ---@param path string
 ---@param config privata.Config
 ---@param project_root string
 ---@return boolean
 function _P.is_excluded(path, config, project_root)
   local excluded = config.exclude or {}
+  local relative = fs.relative(path, project_root)
+
   for i = 1, #excluded do
-    if fs.is_within(path, fs.join(project_root, excluded[i])) then
+    local entry = excluded[i]
+    if _P.has_glob_syntax(entry) then
+      if relative and _P.glob_covers(entry, relative) then
+        return true
+      end
+    elseif fs.is_within(path, fs.join(project_root, entry)) then
       return true
     end
+  end
+  return false
+end
+
+--- True for an exclude entry meant as a glob rather than as a directory name.
+---@param entry string
+---@return boolean
+function _P.has_glob_syntax(entry)
+  return entry:find("[%*%?%[]") ~= nil
+end
+
+--- True when `glob` matches `relative` or any directory above it.
+---@param glob string
+---@param relative string  a path relative to the project root
+---@return boolean
+function _P.glob_covers(glob, relative)
+  local compiled = patterns.from_glob((glob:gsub("/+$", "")))
+  if compiled == nil then
+    return false
+  end
+
+  local candidate = relative
+  while candidate ~= nil and candidate ~= "" and candidate ~= "." do
+    if patterns.any(compiled, candidate) then
+      return true
+    end
+    candidate = candidate:match("^(.*)/[^/]*$")
   end
   return false
 end

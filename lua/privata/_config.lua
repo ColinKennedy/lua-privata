@@ -1,14 +1,23 @@
---- Defaults, `.privata.lua` discovery, preset merging, and validation.
+--- Defaults, config discovery, preset merging, and validation.
 --
--- Layering is defaults < preset < config file < command line, each layer
--- replacing a key outright rather than merging into it. List settings are
--- replacements for the same reason: a user who writes `test_roots = { "t" }`
+-- Layering is defaults < preset < `tach.lua` < `.privata.lua` < command line,
+-- each layer replacing a key outright rather than merging into it. List settings
+-- are replacements for the same reason: a user who writes `test_roots = { "t" }`
 -- means only `t`, and silently unioning the defaults back in would scan
 -- directories they had just excluded.
+--
+-- `tach.lua` sits under `.privata.lua` because the two files answer different
+-- numbers of questions. A tach configuration says where the source is and what
+-- each module publishes -- facts both tools need and neither should have to be
+-- told twice -- while `.privata.lua` is where a project says something privata
+-- specifically should do. A project with both gets the shared facts from one
+-- file and the last word from the other.
 
 local fs = require("privata._fs")
+local interfaces = require("privata._interfaces")
 local literal = require("privata._literal")
 local models = require("privata._models")
+local tach = require("privata._tach")
 
 local M = {}
 local _P = {}
@@ -65,9 +74,13 @@ function _P.defaults()
 
     globals = {},
 
-    entrypoint_globs = {},
-    entrypoint_names = {},
-    entrypoint_modules = {},
+    -- The declared public surface, in tach's vocabulary. An `interfaces` entry
+    -- names what a module publishes on purpose, which is the one thing privata
+    -- cannot infer: a function called from outside this checkout looks exactly
+    -- like one nobody calls. A `modules` entry marked `unchecked` says a file is
+    -- not privata's business at all. See `_interfaces`.
+    interfaces = {},
+    modules = {},
 
     methods = false,
 
@@ -108,27 +121,10 @@ _P.FORMATS = { text = true, json = true }
 _P.LOCAL_FUNCTION_STYLES = { statement = true, assignment = true }
 
 --- Locate `.privata.lua`, walking up from `start` to the filesystem root.
---
--- Walking up means privata run from inside a subdirectory of a project still
--- honours the project's configuration, which is what every other Lua tool does.
 ---@param start string  directory to begin the walk at
 ---@return string|nil  path to `.privata.lua`, or nil when no ancestor has one
 function _P.find_file(start)
-  local directory = fs.normalize(start)
-  local seen = {}
-  while directory and not seen[directory] do
-    seen[directory] = true
-    local candidate = fs.join(directory, _P.FILENAME)
-    if fs.is_file(candidate) then
-      return candidate
-    end
-    local parent = fs.dirname(directory)
-    if parent == directory then
-      break
-    end
-    directory = parent
-  end
-  return nil
+  return fs.find_upwards(start, _P.FILENAME)
 end
 
 --- Deep-copy a value, so one layer's tables are never aliased by the next.
@@ -227,9 +223,6 @@ local STRING_LISTS = {
   "package_private",
   "fail_on",
   "globals",
-  "entrypoint_globs",
-  "entrypoint_names",
-  "entrypoint_modules",
 }
 
 --- Reject a configuration privata cannot honour, rather than half-applying it.
@@ -329,6 +322,18 @@ function _P.validate(config)
     end
   end
 
+  -- The declared surface is checked by the module that reads it, so an
+  -- `interfaces` table means the same thing whichever file it arrived in.
+  local declared = interfaces.problems(config)
+  for i = 1, #declared do
+    problems[#problems + 1] = declared[i]
+  end
+
+  -- Sorted because the `checks` loop above walks a table with `pairs`, and a
+  -- problem list that comes back in a different order each run is one nobody
+  -- can put in a test or diff against a previous run.
+  table.sort(problems)
+
   if #problems > 0 then
     return nil, problems
   end
@@ -337,9 +342,9 @@ end
 
 --- Build the effective configuration for a scan.
 --
--- `overrides` carries command-line settings, which win over the file. Returns
--- the config and the path of the file that contributed to it, or nil plus a
--- list of problems.
+-- `overrides` carries command-line settings, which win over every file. Returns
+-- the config and the path of the highest-priority file that contributed to it,
+-- or nil plus a list of problems.
 ---@param project_root string
 ---@param overrides table<string, any>|nil  command-line settings, which win
 ---@return privata.Config|nil config
@@ -361,8 +366,18 @@ function M.load(project_root, overrides)
     from_file = data
   end
 
+  local tach_path = tach.find_file(project_root)
+  local from_tach = {}
+  if tach_path then
+    local settings, problems = tach.load(tach_path, config.fail_on)
+    if not settings then
+      return nil, problems
+    end
+    from_tach = settings
+  end
+
   -- The preset is chosen by whichever layer names it, but always applies
-  -- beneath both, so an explicit setting in either can still override it.
+  -- beneath all of them, so an explicit setting anywhere can still override it.
   local preset_name = (overrides and overrides.preset) or from_file.preset
   local preset, preset_error = _P.load_preset(preset_name)
   if not preset then
@@ -370,6 +385,7 @@ function M.load(project_root, overrides)
   end
 
   _P.overlay(config, preset)
+  _P.overlay(config, from_tach)
   _P.overlay(config, from_file)
   _P.overlay(config, overrides or {})
   config.preset = preset_name
@@ -392,7 +408,7 @@ function M.load(project_root, overrides)
     return nil, labelled
   end
 
-  return config, file_path
+  return config, file_path or tach_path
 end
 
 --- Exposed so this module's own specs can exercise internals directly.

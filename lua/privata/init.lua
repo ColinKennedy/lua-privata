@@ -10,7 +10,7 @@ local fs = require("privata._fs")
 
 local M = {}
 
-M._VERSION = "0.2.0"
+M._VERSION = "0.3.0"
 
 --- Scan a project and return every finding.
 --

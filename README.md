@@ -47,8 +47,10 @@ Found 1 public symbol that could be made private:
 
   To mark any of these public on purpose, declare it in `.privata.lua` rather than
   privatising it -- privata cannot see callers outside this checkout:
-      entrypoint_names = { "setup" }        -- one name, wherever it is defined
-      entrypoint_modules = { "mylib.api" }  -- everything a module exports
+      interfaces = {
+        { expose = { "setup" } },                   -- one name, wherever it is defined
+        { expose = { ".*" }, from = { "mylib" } },  -- everything a module exports
+      }
 
   lua/example/service.lua:3: function `M.helper` -> move to `_P.helper`
       also read at :8
@@ -96,7 +98,7 @@ Exit codes: `0` clean, `1` findings, `2` bad usage or configuration.
 
 In order of authority:
 
-1. `source_roots` in `.privata.lua`
+1. `source_roots` in `.privata.lua`, or failing that in `tach.lua`
 2. the directories a rockspec's `build.modules` maps into — an explicit
    name-to-file table, and a stronger statement of layout than any convention
 3. `lua/`, then `src/`
@@ -131,6 +133,9 @@ return {
 
   globals = {},                    -- names that are meant to be global
 
+  interfaces = {},                 -- what each module publishes on purpose
+  modules = {},                    -- tach's module table; read for `unchecked`
+
   methods = false,
   ignore_methods = false,          -- never report a `function C:m()` declaration
   skip_unparsable_files = false,
@@ -145,10 +150,104 @@ return {
 }
 ```
 
-The config file is **parsed, never executed**. Rockspecs and `.privata.lua` are
-both Lua source, and loading them would mean running arbitrary code just to scan
-a checkout. The cost is that a config cannot compute: `source_roots =
-vim.fn.glob(...)` is an error, not a list.
+The config file is **parsed, never executed**. Rockspecs, `.privata.lua` and
+`tach.lua` are all Lua source, and loading them would mean running arbitrary
+code just to scan a checkout. The cost is that a config cannot compute:
+`source_roots = vim.fn.glob(...)` is an error, not a list.
+
+### Declaring what is public
+
+`interfaces` is how a project says a name is public on purpose. It is the one
+thing privata cannot infer — a function called from outside this checkout looks
+exactly like one nobody calls — and it is spelled the way
+[tach](https://github.com/gauge-sh/tach) spells it, because tach asks the same
+question of a Python project and there is no reason for two answers:
+
+```lua
+interfaces = {
+  -- Every module's `setup`, wherever it is defined. `from` defaults to
+  -- every module, exactly as it does in tach.
+  { expose = { "setup" } },
+
+  -- Everything `mylib.api` exports.
+  { expose = { ".*" }, from = { "mylib\\.api" } },
+
+  -- A family of names, from one module.
+  { expose = { "build_.*", "serialize_.*" }, from = { "mylib\\.report" } },
+}
+```
+
+`expose` and `from` are **regular expressions**, not Lua patterns, and they
+match a whole name: `expose = { "run" }` publishes `run` and not `run_later`.
+The supported subset is literals, `.`, `*`, `+`, `?`, `[…]` classes and
+backslash escapes; alternation and grouping are refused with an error rather
+than approximated, because a pattern that quietly matches something else decides
+which symbols privata calls public. tach's `visibility`, `data_types` and
+`exclusive` are accepted and ignored — they describe who may *import* an
+interface, which is tach's question.
+
+A symbol stays public when **one** entry matches on both halves. Two entries
+that each match half say nothing together.
+
+`modules` is tach's module table. privata reads one field of it:
+
+```lua
+modules = {
+  { path = "plugin.**", unchecked = true },
+}
+```
+
+`unchecked` means no finding is reported inside those modules. They are still
+parsed, and the names they read still count as uses of the modules they require
+— dropping them from the scan outright would turn their callees into findings
+that are not real. `path` and `paths` are globs over the dotted module name,
+where `*` stops at a dot and `**` does not.
+
+`exclude` reads globs the way tach does, so `"**/generated"` names that
+directory wherever it sits. An entry with no glob character in it is still a
+plain directory name, as it always was.
+
+### `tach.lua`
+
+A project already using tach has answered two of these questions. `tach.lua` is
+`tach.toml`'s schema written as a Lua table — the same keys, the same values,
+the same defaults — and privata reads it as a layer **beneath** `.privata.lua`:
+
+```lua
+-- tach.lua
+return {
+  source_roots = { "lua" },
+  exclude = { "**/tests", "build" },
+
+  interfaces = {
+    { expose = { "main" }, from = { "mylib\\.cli" } },
+  },
+
+  modules = {
+    { path = "mylib.cli", depends_on = { "mylib" }, layer = "ui" },
+  },
+
+  rules = { unused_ignore_directives = "warn" },
+}
+```
+
+What privata takes from it: `source_roots`, `exclude`, `interfaces`, `modules`,
+and `rules.unused_ignore_directives` — which is tach's name for a suppression
+comment that suppresses nothing, and privata's `stale_ignores` check exactly
+(`"off"` switches the check off, `"warn"` keeps it reporting but stops it
+failing the run, `"error"` is privata's own default). Everything else describes
+which module may import which, which privata does not check; those keys are
+validated so the file still loads, and then ignored.
+
+Every key tach accepts is accepted, and an unknown one is refused exactly as
+tach refuses it: a misspelled key is a rule that silently does not apply, which
+is the failure both tools exist to argue against.
+
+Layering is **defaults < preset < `tach.lua` < `.privata.lua` < command line**,
+and each layer replaces a key outright rather than merging into it. So a
+`.privata.lua` that declares `interfaces` replaces tach's list entirely — the
+same rule every other list setting follows. Put the shared facts in `tach.lua`
+and only what the two tools should disagree about in `.privata.lua`.
 
 ### References written as strings
 
@@ -328,10 +427,10 @@ recorded list of blessed findings kept somewhere else is neither.
 return { preset = "neovim" }
 ```
 
-Sets `lua/` as the source root, allows the `vim` global, and treats the files
-Neovim loads itself — `plugin/`, `ftplugin/`, `after/`, `health.lua`, and
-`M.setup` — as public without any module requiring them. Everything it sets is
-a default your own config still overrides.
+Sets `lua/` as the source root, allows the `vim` global, and declares the
+interface Neovim itself reaches — `M.setup`, `check`, and everything a
+`health.lua` exports — as public without any module requiring it. Everything it
+sets is a default your own config still overrides.
 
 ## Module shapes
 
@@ -377,8 +476,10 @@ Found 1 module returning a function that nothing requires:
 ```
 
 A require is enough — the result may be called, passed on, or stored. Requires
-from installed scripts, the rock's namesake module, `entrypoint_modules` and
-`require` written inside a string all count, exactly as they do for a symbol.
+from installed scripts, the rock's namesake module, and `require` written inside
+a string all count, exactly as they do for a symbol. So does an `interfaces`
+entry exposing the one name the module publishes — the function it returns —
+which for `thing/orphan.lua` is `{ expose = { ".*" }, from = { "thing\\.orphan" } }`.
 Test usage does not, on the same rule as everywhere else; the spec is named in
 the report, and the rename is a change the suite survives, since a spec may
 require a private module.
@@ -524,10 +625,14 @@ public API can look like drift. Try it on privata itself: it is clean, but move
 the rockspec's `build.modules` was the only thing saying which module consumers
 require.
 
-The in-band answer is `entrypoint_modules`, which does not depend on packaging:
+The in-band answer is `interfaces`, which does not depend on packaging:
 
 ```lua
-return { entrypoint_modules = { "mylib", "mylib.cli" } }
+return {
+  interfaces = {
+    { expose = { ".*" }, from = { "mylib", "mylib\\.cli" } },
+  },
+}
 ```
 
 A deliberate API not yet called, a hook point kept for extension, a function
