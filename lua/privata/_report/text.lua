@@ -76,11 +76,13 @@ end
 -- Phrased as an instruction with the settings written out, rather than as a
 -- caveat naming two options: the reader is deciding what to do about the list
 -- underneath, and one who has to go find the syntax in the README will not.
-_P.ENTRYPOINT_HINT = {
+_P.INTERFACE_HINT = {
   "  To mark any of these public on purpose, declare it in `.privata.lua` rather than",
   "  privatising it -- privata cannot see callers outside this checkout:",
-  '      entrypoint_names = { "setup" }        -- one name, wherever it is defined',
-  '      entrypoint_modules = { "mylib.api" }  -- everything a module exports',
+  "      interfaces = {",
+  '        { expose = { "setup" } },                   -- one name, wherever it is defined',
+  '        { expose = { ".*" }, from = { "mylib" } },  -- everything a module exports',
+  "      }",
 }
 
 --- Report files that could not be parsed.
@@ -266,7 +268,7 @@ end
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.FunctionModuleFinding[]
 ---@param project_root string  paths are printed relative to this
----@param hint boolean|nil  print the entrypoint hint under this section's heading
+---@param hint boolean|nil  print the interface hint under this section's heading
 function _P.function_modules(out, findings, project_root, hint)
   _P.section(
     out,
@@ -274,7 +276,7 @@ function _P.function_modules(out, findings, project_root, hint)
       "Found %s returning a function that nothing requires:",
       models.count(#findings, "module")
     ),
-    hint and _P.ENTRYPOINT_HINT or nil
+    hint and _P.INTERFACE_HINT or nil
   )
   for i = 1, #findings do
     local entry = findings[i]
@@ -310,12 +312,12 @@ end
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.Symbol[]
 ---@param project_root string  paths are printed relative to this
----@param hint boolean|nil  print the entrypoint hint under this section's heading
+---@param hint boolean|nil  print the interface hint under this section's heading
 function _P.symbols(out, findings, project_root, hint)
   _P.section(
     out,
     string.format("Found %s that could be made private:", models.count(#findings, "public symbol")),
-    hint and _P.ENTRYPOINT_HINT or nil
+    hint and _P.INTERFACE_HINT or nil
   )
   -- The namespace-declaration hint is per file, not per symbol. Printed once
   -- per finding it accounted for eighty-odd identical lines on a real repo.
@@ -514,7 +516,7 @@ end
 ---@param out string[]  the report's lines, appended to in place
 ---@param findings privata.Method[]
 ---@param project_root string  paths are printed relative to this
----@param hint boolean|nil  print the entrypoint hint under this section's heading
+---@param hint boolean|nil  print the interface hint under this section's heading
 function _P.methods(out, findings, project_root, hint)
   local groups = {}
   local order = {}
@@ -536,7 +538,7 @@ function _P.methods(out, findings, project_root, hint)
       models.count(#findings, "public method"),
       models.count(#order, "class", "classes")
     ),
-    hint and _P.ENTRYPOINT_HINT or nil
+    hint and _P.INTERFACE_HINT or nil
   )
 
   for i = 1, #order do

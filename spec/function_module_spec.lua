@@ -200,11 +200,25 @@ describe("function modules", function()
       )
     end)
 
-    it("keeps a configured entrypoint module", function()
+    it("keeps a module a declared interface exposes", function()
       scan({
         ["lua/thing/health.lua"] = "return function() end",
-      }, { entrypoint_modules = { "*.health" } }, function(findings)
+      }, {
+        interfaces = { { expose = { ".*" }, from = { ".*\\.health" } } },
+      }, function(findings)
         assert.same({}, modules(findings))
+      end)
+    end)
+
+    it("still reports one an interface names some other symbol of", function()
+      -- An interface is a statement about names, not a blanket exemption for
+      -- the module it points at: the one name this file publishes is not on it.
+      scan({
+        ["lua/thing/health.lua"] = "return function() end",
+      }, {
+        interfaces = { { expose = { "setup" }, from = { ".*\\.health" } } },
+      }, function(findings)
+        assert.same({ "thing.health" }, modules(findings))
       end)
     end)
 

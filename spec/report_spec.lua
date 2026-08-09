@@ -111,7 +111,7 @@ return C
       end)
     end)
 
-    it("points at the entrypoint options when it reports a public symbol", function()
+    it("points at the interface options when it reports a public symbol", function()
       -- The remedy for a false positive here is not in the code, so it cannot
       -- be inferred from the report: the caller lives outside the checkout.
       render(
@@ -121,13 +121,14 @@ return C
         nil,
         function(text)
           assert.matches("declare it in `%.privata%.lua`", text)
-          assert.matches("entrypoint_names", text)
-          assert.matches("entrypoint_modules", text)
+          assert.matches("interfaces = {", text)
+          assert.matches("expose", text)
+          assert.matches("from", text)
         end
       )
     end)
 
-    it("prints the entrypoint hint once, however many sections want it", function()
+    it("prints the interface hint once, however many sections want it", function()
       -- Three sections share the remedy. Saying it three times would be three
       -- identical paragraphs between the reader and the findings.
       render({
@@ -152,9 +153,9 @@ return C
       end)
     end)
 
-    it("omits the entrypoint hint from sections it cannot resolve", function()
+    it("omits the interface hint from sections it cannot resolve", function()
       -- A global is a defect rather than an interface decision, and no
-      -- entrypoint setting makes `leaked = 1` correct.
+      -- interface entry makes `leaked = 1` correct.
       render(
         {
           ["lua/pkg/init.lua"] = "leaked = 1\nlocal M = {}\nreturn M",
@@ -162,7 +163,7 @@ return C
         nil,
         function(text)
           assert.matches("global binding", text)
-          assert.is_nil(text:find("entrypoint_names", 1, true))
+          assert.is_nil(text:find("interfaces = {", 1, true))
         end
       )
     end)

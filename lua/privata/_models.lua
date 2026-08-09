@@ -170,8 +170,8 @@ local _P = {}
 
 --- The effective configuration for one scan.
 --
--- Layered defaults < preset < `.privata.lua` < command line, each layer
--- replacing a key outright. See `_config.defaults` for the values.
+-- Layered defaults < preset < `tach.lua` < `.privata.lua` < command line, each
+-- layer replacing a key outright. See `_config.defaults` for the values.
 ---@class privata.Config
 ---@field preset string|nil                name of the applied preset
 ---@field source_roots string[]|nil        nil means "discover them"
@@ -186,15 +186,45 @@ local _P = {}
 ---@field package_private string[]         prefixes inside which siblings may reach in
 ---@field fail_on string[]                 finding kinds that make the run exit non-zero
 ---@field globals string[]                 global names the project allows
----@field entrypoint_globs string[]
----@field entrypoint_names string[]        symbol names a host calls, e.g. "setup"
----@field entrypoint_modules string[]      module name patterns kept public wholesale
+---@field interfaces privata.InterfaceEntry[]  what each module publishes on purpose
+---@field modules privata.ModuleEntry[]        tach's module table; read for `unchecked`
 ---@field methods boolean                  the `--methods` spelling of `checks.methods`
 ---@field ignore_methods boolean            never report a `function C:m()` declaration
 ---@field skip_unparsable_files boolean
 ---@field skip_module_collisions boolean
 ---@field format string                    "text" or "json"
 ---@field checks table<string, boolean>    which checks report at all
+
+--- One `[[interfaces]]` entry, spelled exactly as `tach.toml` spells it.
+--
+-- `expose` and `from` are regular expressions matching a whole name, and they
+-- are the two privata reads: a symbol stays public when one entry's `from`
+-- matches its module and that same entry's `expose` matches its name. The rest
+-- are accepted so one table can serve both tools, and describe which module may
+-- import the interface -- a question privata does not ask.
+---@class privata.InterfaceEntry
+---@field expose string[]            names this interface publishes
+---@field from string[]|nil          modules that adopt it; every module by default
+---@field visibility string[]|nil    unused by privata
+---@field data_types string|nil      unused by privata; "all" or "primitive"
+---@field exclusive boolean|nil      unused by privata
+
+--- One `[[modules]]` entry, spelled exactly as `tach.toml` spells it.
+--
+-- `path`/`paths` are module globs, and `unchecked` is the field privata reads:
+-- it means no finding is reported inside the module. The dependency fields
+-- describe an import graph, which is tach's subject and not privata's.
+---@class privata.ModuleEntry
+---@field path string|nil                       a dotted module path or glob
+---@field paths string[]|nil                    shorthand for several of them
+---@field unchecked boolean|nil                 report nothing inside this module
+---@field depends_on (string|table)[]|nil       unused by privata
+---@field cannot_depend_on (string|table)[]|nil unused by privata
+---@field depends_on_external string[]|nil      unused by privata
+---@field cannot_depend_on_external string[]|nil unused by privata
+---@field layer string|nil                      unused by privata
+---@field visibility string[]|nil               unused by privata
+---@field utility boolean|nil                   unused by privata
 
 ---@class privata.UnparsableFinding
 ---@field module string

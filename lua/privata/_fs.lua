@@ -223,7 +223,7 @@ end
 -- successful open proves only that something is there.
 ---@param path string
 ---@return boolean
-function M.is_file(path)
+function _P.is_file(path)
   if BACKEND == "uv" then
     return _P.uv_stat_type(path) == "file"
   elseif BACKEND == "lfs" then
@@ -235,6 +235,34 @@ function M.is_file(path)
   end
   handle:close()
   return not M.is_dir(path)
+end
+
+--- Find `filename` in `start` or the nearest ancestor directory holding it.
+--
+-- Walking up means a tool run from inside a subdirectory of a project still
+-- honours the project's configuration, which is what every other Lua tool does.
+-- Shared by every config file privata looks for, so two of them found in the
+-- same run are always found by the same rule -- a `tach.lua` resolved from one
+-- directory and a `.privata.lua` from another would merge two projects.
+---@param start string    directory to begin the walk at
+---@param filename string basename to look for
+---@return string|nil     the path found, or nil when no ancestor has one
+function M.find_upwards(start, filename)
+  local directory = M.normalize(start)
+  local seen = {}
+  while directory and not seen[directory] do
+    seen[directory] = true
+    local candidate = M.join(directory, filename)
+    if _P.is_file(candidate) then
+      return candidate
+    end
+    local parent = M.dirname(directory)
+    if parent == directory then
+      break
+    end
+    directory = parent
+  end
+  return nil
 end
 
 --- The current working directory, normalized. Falls back to "." if unreadable.
@@ -370,5 +398,12 @@ function M.list_lua_files(root, skip_dir)
   table.sort(out)
   return out
 end
+
+--- Exposed so this module's own specs can exercise internals directly.
+--
+-- privata's rule is that test usage does not make a name public, so the
+-- alternative would be publishing helpers nobody else calls. Naming the seam
+-- explicitly is the honest version of the same access.
+M._P = _P
 
 return M
