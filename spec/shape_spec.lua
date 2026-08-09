@@ -61,6 +61,36 @@ describe("shape", function()
       assert.equal("table", result.kind)
     end)
 
+    it("reads a module that returns a named function", function()
+      -- `local get_foo = require("thing.get_foo"); get_foo(10)` is a module used
+      -- through its return value alone. There is no table, so there are no
+      -- fields to mislabel, and refusing to read it said the one thing about the
+      -- file that was not a problem.
+      local result = detect("local function get_foo(n) return n end\nreturn get_foo")
+      assert.equal("function", result.kind)
+      assert.equal("get_foo", result.public_name)
+      assert.equal(1, result.public_line)
+    end)
+
+    it("reads a function bound with an assignment", function()
+      local result = detect("local run = function() end\nreturn run")
+      assert.equal("function", result.kind)
+      assert.equal("run", result.public_name)
+    end)
+
+    it("reads a function returned without a name", function()
+      local result = detect("return function() end")
+      assert.equal("function", result.kind)
+      assert.is_nil(result.public_name)
+      assert.equal(1, result.public_line)
+    end)
+
+    it("keeps the private namespace of a function module", function()
+      local result = detect("local _P = {}\nlocal function run() end\nreturn run")
+      assert.equal("function", result.kind)
+      assert.equal("_P", result.private_name)
+    end)
+
     it("does not treat the returned table as its own private namespace", function()
       -- A file whose only table is named _P is publishing it, whatever it is
       -- called, so nothing in that file is private by namespace.
@@ -94,6 +124,13 @@ describe("shape", function()
 
     it("refuses a returned name this file did not build", function()
       assert.matches("cannot read", detect("local M = require('other')\nreturn M").reason)
+    end)
+
+    it("refuses a returned function this file did not build", function()
+      -- `return require("other")` re-exports someone else's callable, which
+      -- makes its interface someone else's to report on.
+      assert.matches("cannot read", detect("return require('other')").reason)
+      assert.matches("cannot read", detect("local f = require('other')\nreturn f").reason)
     end)
 
     it("refuses a computed return", function()

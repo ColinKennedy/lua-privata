@@ -41,6 +41,15 @@ function M.find_private_candidates(project_root, overrides)
   return findings and findings.symbols or {}
 end
 
+--- Modules whose whole export is a function that nothing requires.
+---@param project_root string|nil  defaults to the current directory
+---@param overrides table<string, any>|nil  the same keys as `.privata.lua`
+---@return privata.FunctionModuleFinding[]
+function M.find_function_modules(project_root, overrides)
+  local findings = M.check(project_root, overrides)
+  return findings and findings.function_modules or {}
+end
+
 --- Global bindings, which are public to the entire process.
 ---@param project_root string|nil  defaults to the current directory
 ---@param overrides table<string, any>|nil  the same keys as `.privata.lua`
@@ -89,6 +98,15 @@ function M.find_method_candidates(project_root, overrides)
   end
   local findings = M.check(project_root, merged)
   return findings and findings.methods or {}
+end
+
+--- `-- privata: ignore` comments that no longer suppress anything.
+---@param project_root string|nil  defaults to the current directory
+---@param overrides table<string, any>|nil  the same keys as `.privata.lua`
+---@return privata.StaleIgnoreFinding[]
+function M.find_stale_ignores(project_root, overrides)
+  local findings = M.check(project_root, overrides)
+  return findings and findings.stale_ignores or {}
 end
 
 --- Files privata could not parse.

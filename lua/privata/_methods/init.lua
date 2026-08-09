@@ -273,8 +273,10 @@ function M.collect(modules, cross_references, external_interface)
             and not referenced_elsewhere
             and not cross_references[module_name .. "\0" .. name]
             and not external_interface[module_name .. "\0" .. name]
-            and not record.ignored_lines[method.line]
             and not _P.forwards_to_base(record.chunk, class_name, name)
+            -- Asked last, so a method dropped for any reason above does not
+            -- credit the comment with a suppression it never performed.
+            and not models.is_ignored(record, method.line)
           then
             findings[#findings + 1] = {
               name = name,

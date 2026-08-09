@@ -77,10 +77,14 @@ function M.go() return secret._go() end
 return M
 ]],
           ["lua/pkg/exports.lua"] = "local function a() end\nreturn { a = a, b = b }",
+          ["lua/pkg/orphan.lua"] = "local function run() end\nreturn run",
+          ["lua/pkg/stale.lua"] = "-- privata: ignore\nlocal M = {}\nreturn M",
         },
         nil,
         function(text)
           assert.matches("could not be parsed", text)
+          assert.matches("returning a function that nothing requires", text)
+          assert.matches("unused `privata: ignore` comment", text)
           assert.matches("module shape could not be determined", text)
           assert.matches("could be made private", text)
           assert.matches("global binding", text)
@@ -240,6 +244,8 @@ return C
         nil,
         function(_, json)
           assert.matches('"symbols":%[%]', json)
+          assert.matches('"function_modules":%[%]', json)
+          assert.matches('"stale_ignores":%[%]', json)
           assert.matches('"methods":%[%]', json)
         end
       )

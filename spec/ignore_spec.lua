@@ -136,6 +136,179 @@ return M
     )
   end)
 
+  it("takes anything written after the marker as a reason", function()
+    scan(
+      {
+        ["lua/pkg/init.lua"] = "local M = {}\n"
+          .. "function M.h() end -- privata: ignore (the host calls this)\n"
+          .. "return M",
+      },
+      nil,
+      function(findings)
+        assert.same({}, findings.symbols)
+        assert.same({}, findings.stale_ignores)
+      end
+    )
+  end)
+
+  it("is not triggered by prose that mentions the marker", function()
+    -- Documentation about this feature is written in Lua comments too. Under a
+    -- plain substring match, a line explaining `-- privata: ignore` silently
+    -- suppressed whatever finding landed on it -- and privata's own source has
+    -- three such lines.
+    scan(
+      {
+        ["lua/pkg/init.lua"] = "local M = {}\n"
+          .. "-- `-- privata: ignore` is the answer there.\n"
+          .. "function M.h() end\n"
+          .. "return M",
+      },
+      nil,
+      function(findings)
+        assert.equal(1, #findings.symbols)
+        assert.same({}, findings.stale_ignores)
+      end
+    )
+  end)
+
+  describe("when it has nothing left to suppress", function()
+    it("reports a comment whose finding is gone", function()
+      -- The symbol is read from another module, so there is no finding here to
+      -- suppress. Left in place the comment would silently swallow the *next*
+      -- finding on that line.
+      scan(
+        {
+          ["lua/pkg/service.lua"] = "local M = {}\n"
+            .. "function M.run() end -- privata: ignore\n"
+            .. "return M",
+          ["lua/pkg/api.lua"] = [[
+local service = require("pkg.service")
+local M = {}
+function M.go() return service.run() end
+return M
+]],
+        },
+        nil,
+        function(findings)
+          assert.equal(1, #findings.stale_ignores)
+          assert.equal("pkg.service", findings.stale_ignores[1].module)
+          assert.equal(2, findings.stale_ignores[1].line)
+          assert.is_false(findings.stale_ignores[1].bare)
+        end
+      )
+    end)
+
+    it("leaves a comment that is doing work alone", function()
+      scan(
+        {
+          ["lua/pkg/init.lua"] = "local M = {}\nfunction M.h() end -- privata: ignore\nreturn M",
+        },
+        nil,
+        function(findings)
+          assert.same({}, findings.symbols)
+          assert.same({}, findings.stale_ignores)
+        end
+      )
+    end)
+
+    it("says a comment on a line of its own never suppressed anything", function()
+      -- Findings are reported against the line the code is on, so a comment
+      -- written above one silences nothing -- the likeliest reason an ignore
+      -- looks stale, and worth saying rather than leaving to be puzzled out.
+      scan(
+        {
+          ["lua/pkg/init.lua"] = "-- privata: ignore\nlocal M = {}\nfunction M.h() end\nreturn M",
+        },
+        nil,
+        function(findings)
+          assert.equal(1, #findings.symbols)
+          assert.equal(1, #findings.stale_ignores)
+          assert.is_true(findings.stale_ignores[1].bare)
+        end
+      )
+    end)
+
+    it("credits a check that is switched off", function()
+      -- The method check is opt-in, and an ignore it would honour is doing its
+      -- job whether or not this run looked. Calling it removable would be advice
+      -- that breaks the moment `--methods` comes back.
+      scan(
+        {
+          ["lua/pkg/point.lua"] = [[
+local C = {}
+C.__index = C
+function C:scale() end -- privata: ignore
+function C.new() return setmetatable({}, C) end
+return C
+]],
+          ["lua/pkg/init.lua"] = [[
+local point = require("pkg.point")
+local M = {}
+function M.go() return point.new() end
+return M
+]],
+        },
+        nil,
+        function(findings)
+          assert.same({}, findings.methods)
+          assert.same({}, findings.stale_ignores)
+        end
+      )
+    end)
+
+    it("says nothing about a file whose shape could not be read", function()
+      -- Such a file contributes no symbols at all, so its comments suppressed
+      -- nothing for a reason that has nothing to do with them. They may be
+      -- load-bearing the moment the shape is fixed.
+      scan(
+        {
+          ["lua/pkg/init.lua"] = "local M = {}\nfunction M.h() end -- privata: ignore\nreturn M, 1",
+        },
+        nil,
+        function(findings)
+          assert.equal(1, #findings.unanalyzable)
+          assert.same({}, findings.stale_ignores)
+        end
+      )
+    end)
+
+    it("says nothing about a module that exports its private namespace", function()
+      -- privata suppresses that file's per-field findings itself, so an unused
+      -- comment there is evidence of privata's own silence, not of staleness.
+      scan(
+        {
+          ["lua/pkg/init.lua"] = "local _P = {}\nfunction _P.h() end -- privata: ignore\nreturn _P",
+        },
+        nil,
+        function(findings)
+          assert.equal(1, #findings.exported_namespaces)
+          assert.same({}, findings.stale_ignores)
+        end
+      )
+    end)
+
+    it("says nothing about a file it could not parse", function()
+      scan(
+        {
+          ["lua/pkg/broken.lua"] = "local = = -- privata: ignore",
+        },
+        nil,
+        function(findings)
+          assert.same({}, findings.unparsable)
+          assert.same({}, findings.stale_ignores)
+        end
+      )
+    end)
+
+    it("can be switched off", function()
+      scan({
+        ["lua/pkg/init.lua"] = "-- privata: ignore\nlocal M = {}\nreturn M",
+      }, { checks = { stale_ignores = false } }, function(findings)
+        assert.same({}, findings.stale_ignores)
+      end)
+    end)
+  end)
+
   it("does not need code on the line to work", function()
     -- The comment is matched against raw source, so a suppression on its own
     -- line is not silently ignored -- it just does not match any finding.

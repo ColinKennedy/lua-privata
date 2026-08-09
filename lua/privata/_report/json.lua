@@ -182,6 +182,16 @@ function M.render(findings, project_root, config)
         public_fields = entry.public_symbols,
       }
     end),
+    function_modules = _P.map(findings.function_modules, function(entry)
+      return {
+        file = _P.relative(entry.path, project_root),
+        line = entry.line,
+        module = entry.module,
+        name = entry.name,
+        anonymous = entry.anonymous,
+        private_module = entry.private_module,
+      }
+    end),
     symbols = _P.map(findings.symbols, function(entry)
       return _P.symbol(entry, project_root)
     end),
@@ -219,6 +229,14 @@ function M.render(findings, project_root, config)
         name = entry.name,
         binding = entry.binding,
         issue = entry.kind,
+      }
+    end),
+    stale_ignores = _P.map(findings.stale_ignores, function(entry)
+      return {
+        file = _P.relative(entry.path, project_root),
+        line = entry.line,
+        module = entry.module,
+        bare = entry.bare,
       }
     end),
     methods = _P.map(findings.methods, function(entry)

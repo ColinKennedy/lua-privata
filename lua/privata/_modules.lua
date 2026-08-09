@@ -25,24 +25,42 @@ local _P = {}
 ---@field end_line integer|nil last line of a function value, where there is one
 ---@field value privata.Node|nil the assigned expression, on literal-table fields
 
-M.IGNORE_COMMENT = "privata: ignore"
-
 --- Line numbers carrying a `-- privata: ignore` comment.
 --
 -- Matched against raw source text rather than tokens because the lexer discards
 -- comments, and a suppression that only worked when the line also held code
 -- would be a surprising rule to explain.
+--
+-- The marker must be the *first thing in the comment*, so anything may follow
+-- it -- `-- privata: ignore (the host calls this)` works -- but a line that
+-- merely mentions it in prose is not a directive. Documentation about this
+-- feature is written in Lua comments too, and privata's own source is the proof:
+-- three of its doc comments name the marker, and under a plain substring match
+-- each one silently suppressed whatever finding landed on its line.
+--
+-- The second return says which of those lines hold nothing but the comment. It
+-- costs one string match and it names the likeliest reason an ignore suppresses
+-- nothing: findings are reported against the line the code is on, so a comment
+-- written on the line *above* silences nothing at all.
 ---@param source string  raw file contents
----@return table<integer, boolean>  set of 1-based line numbers
+---@return table<integer, boolean> ignored  set of 1-based line numbers
+---@return table<integer, boolean> bare     those of them holding no code
 function _P.ignored_lines(source)
   local ignored = {}
+  local bare = {}
   local lines = lexer.source_lines(source)
   for number = 1, #lines do
-    if lines[number]:find(M.IGNORE_COMMENT, 1, true) then
+    local text = lines[number]
+    -- The leftmost `--` and whatever follows it; `string.match` finds the first.
+    local comment = text:match("%-%-%s*(.*)$")
+    if comment and comment:sub(1, #models.IGNORE_COMMENT) == models.IGNORE_COMMENT then
       ignored[number] = true
+      if text:find("^%s*%-%-") then
+        bare[number] = true
+      end
     end
   end
-  return ignored
+  return ignored, bare
 end
 
 --- The field name a target assigns on `holder`, or nil.
@@ -240,9 +258,13 @@ function _P.extract_symbols(module_record)
     }
   end
 
-  -- A side-effect module publishes no interface, so there is nothing here to
-  -- report. Its references still reach the rest of the scan through its chunk.
-  if detected.kind == shape.KINDS.SIDE_EFFECT then
+  -- Two shapes publish no fields at all, so there is nothing here to report.
+  -- A side-effect module exports nothing; a module whose whole export is a
+  -- function exports one value that cannot be indexed, which makes the function
+  -- the interface, entire -- and whether anything requires *that* is the
+  -- function-module check's question rather than this one's. Both are still
+  -- parsed, and the names they read still count as uses of what they require.
+  if detected.kind == shape.KINDS.SIDE_EFFECT or detected.kind == shape.KINDS.FUNCTION then
     return symbols, private_symbols
   end
 
@@ -308,7 +330,7 @@ function _P.load_module(path, root, module_name, config)
     return nil, { module = module_name, path = path, line = 0, message = read_error }
   end
 
-  local ignored = _P.ignored_lines(source)
+  local ignored, bare = _P.ignored_lines(source)
 
   local chunk, parse_error = parser.parse(source)
   if chunk == nil then
@@ -335,6 +357,8 @@ function _P.load_module(path, root, module_name, config)
     package_parts = source_roots.package_parts(module_name),
     chunk = chunk,
     ignored_lines = ignored,
+    bare_ignores = bare,
+    used_ignores = {},
     shape = shape.detect(chunk, config),
     scope = scope.analyze(chunk),
     symbols = {},
@@ -433,7 +457,7 @@ function M.collect(roots, config, project_root, options)
         unparsable[#unparsable + 1] = failure
       end
     else
-      if record.shape.kind == nil and not record.ignored_lines[record.shape.line or 1] then
+      if record.shape.kind == nil and not models.is_ignored(record, record.shape.line or 1) then
         unanalyzable[#unanalyzable + 1] = {
           module = entry.module_name,
           path = entry.path,
