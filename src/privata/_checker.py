@@ -107,6 +107,44 @@ def _test_helper_method_references(
     return references
 
 
+def _split_test_source_roots(
+    project_root: Path,
+    roots: list[Path],
+) -> tuple[list[Path], list[Path]]:
+    """Split test roots into local helper roots and external consumer roots."""
+    local: list[Path] = []
+    external: list[Path] = []
+    for root in roots:
+        if not is_test_source_root(root):
+            continue
+        if root.is_relative_to(project_root):
+            local.append(root)
+        else:
+            external.append(root)
+    return local, external
+
+
+def _merge_method_references(*reference_maps: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Union method references keyed by module name."""
+    merged: dict[str, set[str]] = {}
+    for reference_map in reference_maps:
+        for module_name, names in reference_map.items():
+            merged.setdefault(module_name, set()).update(names)
+    return merged
+
+
+def _external_test_method_references(
+    modules: dict[str, Module],
+    test_consumers: dict[str, Module],
+) -> dict[str, set[str]]:
+    """Return names external test files mention for imported production modules."""
+    references: dict[str, set[str]] = {}
+    for consumer in test_consumers.values():
+        for module_name, names in referenced_names_by_module(consumer, modules).items():
+            references.setdefault(module_name, set()).update(names)
+    return references
+
+
 def _collect_privacy_findings(
     project_root: Path,
     *,
@@ -120,12 +158,20 @@ def _collect_privacy_findings(
     """
     roots = source_roots(project_root)
     modules, unparsable_modules = collect_modules_with_errors(roots)
-    test_roots = [root for root in roots if is_test_source_root(root)]
-    test_consumers = collect_test_consumers(test_roots)
-    cross_imports = find_cross_imports(modules) | _test_helper_cross_imports(
-        test_roots,
-        modules,
-        test_consumers,
+    local_test_roots, external_test_roots = _split_test_source_roots(project_root, roots)
+    local_test_consumers = collect_test_consumers(local_test_roots)
+    external_test_consumers = collect_test_consumers(external_test_roots)
+    cross_imports = (
+        find_cross_imports(modules)
+        | find_cross_imports(
+            modules,
+            external_test_consumers,
+        )
+        | _test_helper_cross_imports(
+            local_test_roots,
+            modules,
+            local_test_consumers,
+        )
     )
     external_entrypoints = collect_external_entrypoints(project_root)
     public_interface_exports = load_tach_interface_exports(project_root)
@@ -149,10 +195,16 @@ def _collect_privacy_findings(
                 public_interface=(
                     external_entrypoints | public_interface_exports | package_reexports
                 ),
-                test_references=_test_helper_method_references(
-                    test_roots,
-                    modules,
-                    test_consumers,
+                test_references=_merge_method_references(
+                    _test_helper_method_references(
+                        local_test_roots,
+                        modules,
+                        local_test_consumers,
+                    ),
+                    _external_test_method_references(
+                        modules,
+                        external_test_consumers,
+                    ),
                 ),
             )
             if include_methods

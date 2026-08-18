@@ -319,6 +319,42 @@ expose = ["RuntimeFacade"]
     assert ("pkg.runtime", "local_helper") in symbols
 
 
+def test_external_test_source_root_keeps_public_symbol(tmp_path: Path) -> None:
+    """A sibling project's tests can keep a scanned project's symbol public."""
+    core = tmp_path / "core"
+    engine = tmp_path / "engine"
+    _write(
+        core / "src" / "corepkg" / "api.py",
+        """
+def public_helper() -> int:
+    return 1
+
+def local_helper() -> int:
+    return 2
+""".strip()
+        + "\n",
+    )
+    _write(
+        engine / "tests" / "test_api.py",
+        """
+from corepkg.api import public_helper
+
+
+def test_public_helper() -> None:
+    assert public_helper() == 1
+""".strip()
+        + "\n",
+    )
+    _write(
+        core / "tach.toml",
+        'source_roots = ["src", "../engine/tests"]\n',
+    )
+
+    symbols = _symbols(core)
+    assert ("corepkg.api", "public_helper") not in symbols
+    assert ("corepkg.api", "local_helper") in symbols
+
+
 def test_private_module_imported_within_same_package_is_ignored(tmp_path: Path) -> None:
     """Private modules can be imported from within their own package subtree."""
     _write(
@@ -3481,6 +3517,41 @@ def test_run() -> None:
     )
 
     assert _methods(tmp_path) == {("pkg.service", "Service", "run")}
+
+
+def test_external_test_source_root_keeps_public_method(tmp_path: Path) -> None:
+    """A sibling project's tests act as external consumers for method privacy."""
+    core = tmp_path / "core"
+    engine = tmp_path / "engine"
+    _write(
+        core / "src" / "corepkg" / "service.py",
+        """
+class Service:
+    def run(self) -> int:
+        return 1
+
+    def helper(self) -> int:
+        return 2
+""".strip()
+        + "\n",
+    )
+    _write(
+        engine / "tests" / "test_service.py",
+        """
+from corepkg.service import Service
+
+
+def test_run() -> None:
+    assert Service().run() == 1
+""".strip()
+        + "\n",
+    )
+    _write(
+        core / "tach.toml",
+        'source_roots = ["src", "../engine/tests"]\n',
+    )
+
+    assert _methods(core) == {("corepkg.service", "Service", "helper")}
 
 
 def test_method_collection_skips_modules_without_a_tree() -> None:
